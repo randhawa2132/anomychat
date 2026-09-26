@@ -34,7 +34,8 @@ const wallpaperChoices = ["default", "clay", "paper", "slate", "midnight"] as co
 type WallpaperChoice = typeof wallpaperChoices[number];
 type RoomWallpaper = WallpaperChoice | `#${string}`;
 type StarredMessage = { roomId: string; eventId: string };
-const maxMediaBytes = 20 * 1024 * 1024;
+const maxMediaBytes = 100 * 1024 * 1024;
+const maxVoiceBytes = 20 * 1024 * 1024;
 const configuredBaseUrl = import.meta.env.VITE_MATRIX_BASE_URL || (Capacitor.isNativePlatform()
   ? ""
   : ["localhost", "127.0.0.1"].includes(location.hostname) ? "http://localhost:8008" : location.origin);
@@ -62,7 +63,7 @@ let pushFeedbackText = "";
 let displayNameDraft: string | null = null;
 let ownDisplayName: string | null = null;
 let statusText = "";
-let draftText = "";
+const draftTextByRoom = new Map<string, string>();
 let roomSearch = "";
 let activeCall: sdk.MatrixCall | null = null;
 let activeVoiceRecorder: MediaRecorder | null = null;
@@ -1062,18 +1063,43 @@ function showCall(call: sdk.MatrixCall, incoming: boolean, requestedVideo?: bool
   if (video) media.append(sharedScreen);
   if (video) media.append(local);
   const controls = element("div", "call-controls");
+  const callIcon = (name: string) => {
+    const paths: Record<string, string> = {
+      mic: "M12 18a4 4 0 0 0 4-4V7a4 4 0 0 0-8 0v7a4 4 0 0 0 4 4Zm-7-5a7 7 0 0 0 14 0M12 20v3m-4 0h8",
+      muted: "M3 3l18 18M9 9v5a4 4 0 0 0 7 2.6M8 5.2A4 4 0 0 1 16 7v5M5 13a7 7 0 0 0 12 4.9M19 13a7 7 0 0 1-.5 2.6M12 20v3m-4 0h8",
+      camera: "M3 6h13a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Zm15 4 5-3v10l-5-3",
+      flip: "M20 7a8 8 0 0 0-14-2L4 7m0-4v4h4M4 17a8 8 0 0 0 14 2l2-2m0 4v-4h-4",
+      screen: "M3 4h18v13H3zM8 21h8m-4-4v4",
+      phone: "M4 15c4-4 12-4 16 0l-2 4-4-2v-2h-4v2l-4 2z",
+    };
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("viewBox", "0 0 24 24");
+    icon.setAttribute("width", "24");
+    icon.setAttribute("height", "24");
+    icon.setAttribute("fill", "none");
+    icon.setAttribute("stroke", "currentColor");
+    icon.setAttribute("stroke-width", "2");
+    icon.setAttribute("stroke-linecap", "round");
+    icon.setAttribute("stroke-linejoin", "round");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", paths[name]);
+    icon.append(path);
+    return icon;
+  };
   const control = (label: string, icon: string, className = "call-control", shortLabel = label) => {
     const button = element("button", className);
     button.type = "button";
     button.ariaLabel = label;
     button.title = label;
-    button.append(element("span", "call-control-icon", icon), element("span", "call-control-label", shortLabel));
+    const iconHolder = element("span", "call-control-icon");
+    iconHolder.append(callIcon(icon));
+    button.append(iconHolder, element("span", "call-control-label", shortLabel));
     return button;
   };
   const updateControl = (button: HTMLButtonElement, label: string, icon: string, shortLabel = label) => {
     button.ariaLabel = label;
     button.title = label;
-    button.querySelector(".call-control-icon")!.textContent = icon;
+    button.querySelector(".call-control-icon")!.replaceChildren(callIcon(icon));
     button.querySelector(".call-control-label")!.textContent = shortLabel;
   };
   const play = element("button", "call-control", "▶ Play media");
@@ -1085,28 +1111,28 @@ function showCall(call: sdk.MatrixCall, incoming: boolean, requestedVideo?: bool
   };
   play.addEventListener("click", () => void startPlayback());
   remote.addEventListener("playing", () => { play.hidden = true; });
-  const mic = control("Mute", "🎙");
+  const mic = control("Mute", "mic");
   mic.addEventListener("click", async () => {
     mic.disabled = true;
     try {
       const muted = await call.setMicrophoneMuted(!call.isMicrophoneMuted());
-      updateControl(mic, muted ? "Unmute" : "Mute", muted ? "🔇" : "🎙");
+      updateControl(mic, muted ? "Unmute" : "Mute", muted ? "muted" : "mic");
       mic.classList.toggle("muted", muted);
     } catch (error) { feedback.textContent = `Microphone control failed: ${errorMessage(error)}`; }
     finally { mic.disabled = false; }
   });
-  const camera = control("Camera off", "▣", "call-control", "Video");
+  const camera = control("Camera off", "camera", "call-control", "Video");
   camera.addEventListener("click", async () => {
     camera.disabled = true;
     try {
       const muted = await call.setLocalVideoMuted(!call.isLocalVideoMuted());
-      updateControl(camera, muted ? "Camera on" : "Camera off", "▣", "Video");
+      updateControl(camera, muted ? "Camera on" : "Camera off", "camera", "Video");
       camera.classList.toggle("muted", muted);
       refreshMedia();
     } catch (error) { feedback.textContent = `Camera control failed: ${errorMessage(error)}`; }
     finally { camera.disabled = false; }
   });
-  const flip = control("Flip camera", "⟳", "call-control", "Flip");
+  const flip = control("Flip camera", "flip", "call-control", "Flip");
   flip.hidden = true;
   flip.addEventListener("click", async () => {
     const current = call.localUsermediaStream?.getVideoTracks()[0];
@@ -1129,17 +1155,17 @@ function showCall(call: sdk.MatrixCall, incoming: boolean, requestedVideo?: bool
     } catch (error) { feedback.textContent = `Could not switch camera: ${errorMessage(error)}`; }
     finally { flip.disabled = false; }
   });
-  const share = control("Share screen", "▣", "call-control", "Share");
+  const share = control("Share screen", "screen", "call-control", "Share");
   share.addEventListener("click", async () => {
     share.disabled = true;
     try {
       const enabled = await call.setScreensharingEnabled(!call.localScreensharingStream);
-      updateControl(share, enabled ? "Stop sharing" : "Share screen", "▣", enabled ? "Stop" : "Share");
+      updateControl(share, enabled ? "Stop sharing" : "Share screen", "screen", enabled ? "Stop" : "Share");
       feedback.textContent = enabled ? "You are sharing your screen" : "Screen sharing stopped";
     } catch (error) { feedback.textContent = `Screen sharing failed: ${errorMessage(error)}`; }
     finally { share.disabled = false; }
   });
-  const end = control(incoming ? "Decline" : "End call", "☎", "hangup-button", incoming ? "Decline" : "End");
+  const end = control(incoming ? "Decline" : "End call", "phone", "hangup-button", incoming ? "Decline" : "End");
   end.addEventListener("click", () => {
     stopRingtone();
     ringButton.hidden = true;
@@ -1147,19 +1173,25 @@ function showCall(call: sdk.MatrixCall, incoming: boolean, requestedVideo?: bool
     else call.hangup(CallErrorCode.UserHangup, false);
     dialog.close();
   });
+  let answer: HTMLButtonElement | undefined;
   if (incoming) {
-    const answer = element("button", "answer-button", video ? "Answer video" : "Answer voice");
-    answer.type = "button";
-    answer.addEventListener("click", async () => {
+    const answerButton = element("button", "answer-button", video ? "Answer video" : "Answer voice");
+    answer = answerButton;
+    answerButton.type = "button";
+    answerButton.addEventListener("click", async () => {
       stopRingtone();
       ringButton.hidden = true;
-      answer.disabled = true;
-      updateControl(end, "End call", "☎", "End");
+      answerButton.disabled = true;
+      answerButton.hidden = true;
+      updateControl(end, "End call", "phone", "End");
       feedback.textContent = "Connecting…";
       try { await call.answer(true, video); }
-      catch (error) { feedback.textContent = `Call failed: ${errorMessage(error)}`; }
+      catch (error) {
+        feedback.textContent = `Call failed: ${errorMessage(error)}`;
+        if (call.state === CallState.Ringing) { answerButton.disabled = false; answerButton.hidden = false; }
+      }
     });
-    controls.append(answer);
+    controls.append(answerButton);
   }
   controls.append(play, mic);
   if (video) {
@@ -1196,6 +1228,7 @@ function showCall(call: sdk.MatrixCall, incoming: boolean, requestedVideo?: bool
   call.on(sdk.CallEvent.FeedsChanged, refreshMedia);
   call.on(sdk.CallEvent.State, (state) => {
     if (state !== CallState.Ringing) { stopRingtone(); ringButton.hidden = true; }
+    if (answer && state !== CallState.Ringing) answer.hidden = true;
     if (state === CallState.Connected) feedback.textContent = "Connected";
     else if (state === CallState.Connecting) feedback.textContent = "Connecting…";
     else if (state === CallState.Ended) {
@@ -1410,7 +1443,7 @@ async function signOut(): Promise<void> {
   temporaryRecoveryKey = null;
   recoveryState = "checking";
   activeRoomId = null;
-  draftText = "";
+  draftTextByRoom.clear();
   clearMediaUrls();
   savedProfilePictureEvent = undefined;
   pinnedRoomIds = [];
@@ -1996,7 +2029,7 @@ function renderApp(): void {
       }
       if (messages.length === 0) timeline.append(element("p", "empty-timeline", clearedAt ? "Chat cleared on this device. New messages will appear here." : "This encrypted room is ready for its first message."));
       content.append(timeline);
-      if (!room.currentState.maySendEvent("m.room.encrypted", currentSession.userId)) {
+      if (!room.maySendMessage()) {
         content.append(element("div", "warning", "Only room moderators can post here."));
       } else {
       const form = element("form", "composer");
@@ -2015,11 +2048,11 @@ function renderApp(): void {
       });
       const input = element("input");
       input.placeholder = "Write a message";
-      input.value = draftText;
+      input.value = draftTextByRoom.get(room.roomId) || "";
       input.ariaLabel = "Message";
       input.required = true;
       input.maxLength = 10000;
-      input.addEventListener("input", () => { draftText = input.value; });
+      input.addEventListener("input", () => { draftTextByRoom.set(room.roomId, input.value); });
       const send = element("button", "primary", "Send");
       send.type = "submit";
       const attach = element("button", "attach-button");
@@ -2070,7 +2103,7 @@ function renderApp(): void {
             body,
             ...(ttl ? { "com.sales_messenger.expires_in_ms": ttl } : {}),
           } as RoomMessageEventContent);
-          draftText = ""; input.value = ""; setStatus("Message sent"); renderApp();
+          draftTextByRoom.delete(room.roomId); input.value = ""; setStatus("Message sent"); renderApp();
         }
         catch (error) { setStatus(`Send failed: ${errorMessage(error)}`); send.disabled = false; }
       });
@@ -2136,27 +2169,6 @@ function previewableImage(mime: unknown): boolean {
   return typeof mime === "string" && ["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"].includes(mime);
 }
 
-async function readLimitedBody(response: Response, limit: number): Promise<ArrayBuffer> {
-  if (!response.body) throw new Error("Attachment response has no body.");
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel();
-      throw new Error("Attachment exceeds the 20 MB limit.");
-    }
-    chunks.push(value);
-  }
-  const result = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
-  return result.buffer;
-}
-
 function sendAttachmentDialog(roomId: string, file: File): void {
   const dialog = recoveryDialog("Send attachment");
   const form = element("form", "recovery-form");
@@ -2184,13 +2196,13 @@ function sendAttachmentDialog(roomId: string, file: File): void {
 async function sendMedia(roomId: string, file: File, voiceDurationMs?: number, viewOnce = false): Promise<boolean> {
   const target = client;
   if (!target?.getRoom(roomId)?.hasEncryptionStateEvent()) { setStatus("Attachment blocked: encryption is not enabled in this room."); return false; }
-  if (file.size > maxMediaBytes) { setStatus("Attachment must be 20 MB or smaller."); return false; }
+  if (file.size > maxMediaBytes) { setStatus("Attachment must be 100 MB or smaller."); return false; }
   setStatus(`Encrypting ${file.name}…`);
   try {
     const encrypted = await encryptMedia(file);
     if (client !== target) return false;
     setStatus(`Uploading encrypted ${file.name}…`);
-    const uploaded = await target.uploadContent(new Uint8Array(encrypted.ciphertext), {
+    const uploaded = await target.uploadContent(encrypted.ciphertext, {
       type: "application/octet-stream",
       includeFilename: false,
     });
@@ -2230,7 +2242,7 @@ async function sendSecurePicture(roomIds: string[], file: File, kind: PictureKin
   try {
     const encrypted = await encryptMedia(file);
     if (client !== target) return false;
-    const uploaded = await target.uploadContent(new Uint8Array(encrypted.ciphertext), { type: "application/octet-stream", includeFilename: false });
+    const uploaded = await target.uploadContent(encrypted.ciphertext, { type: "application/octet-stream", includeFilename: false });
     if (client !== target) return false;
     const content = {
       body: kind === "room" ? "Room picture" : "Profile picture",
@@ -2322,7 +2334,7 @@ async function recordVoiceMessage(roomId: string): Promise<void> {
       if (!event.data.size) return;
       chunks.push(event.data);
       bytes += event.data.size;
-      if (bytes > maxMediaBytes && recorder.state === "recording") recorder.stop();
+      if (bytes > maxVoiceBytes && recorder.state === "recording") recorder.stop();
     });
     recorder.addEventListener("stop", () => {
       if (tick) clearInterval(tick);
@@ -2332,7 +2344,7 @@ async function recordVoiceMessage(roomId: string): Promise<void> {
       activeVoiceStream = null;
       if (discarded || !dialog.open) return;
       stop.hidden = true;
-      if (bytes > maxMediaBytes || bytes === 0) { status.textContent = "Recording is empty or exceeds 20 MB. Try again."; return; }
+      if (bytes > maxVoiceBytes || bytes === 0) { status.textContent = "Recording is empty or exceeds 20 MB. Try again."; return; }
       const mime = recorder.mimeType || "audio/webm";
       const blob = new Blob(chunks, { type: mime });
       recordedFile = new File([blob], `voice-message.${mime.includes("mp4") ? "m4a" : "webm"}`, { type: mime });
@@ -2368,9 +2380,9 @@ async function loadMediaUrl(eventId: string, media: EncryptedMedia, mime: unknow
   const response = await fetch(url, { headers: { Authorization: `Bearer ${session.accessToken}` }, redirect: "error" });
   if (!response.ok) throw new Error(`Media download returned ${response.status}.`);
   const advertisedSize = Number(response.headers.get("content-length"));
-  if (advertisedSize > maxMediaBytes) throw new Error("Attachment exceeds the 20 MB limit.");
-  const ciphertext = await readLimitedBody(response, maxMediaBytes);
-  const plaintext = await decryptMedia(ciphertext, media);
+  if (advertisedSize > maxMediaBytes) throw new Error("Attachment exceeds the 100 MB limit.");
+  if (!response.body) throw new Error("Attachment response has no body.");
+  const plaintext = await decryptMedia(response.body, media, maxMediaBytes);
   if (client !== target) throw new Error("Account changed during download.");
   const objectUrl = URL.createObjectURL(new Blob([plaintext], { type: typeof mime === "string" ? mime : "application/octet-stream" }));
   mediaUrls.set(eventId, objectUrl);

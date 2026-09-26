@@ -57,7 +57,7 @@ macaroon_secret_key: "$macaroon_secret"
 form_secret: "$form_secret"
 trusted_key_servers: []
 federation_domain_whitelist: []
-max_upload_size: 25M
+max_upload_size: 110M
 listeners:
   - port: 8008
     tls: false

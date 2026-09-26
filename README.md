@@ -7,6 +7,7 @@ An open-source, self-hosted Matrix communication app for a small organization. T
 ## What is included
 
 - Web messenger: encrypted direct and group rooms, files and voice notes, room invitations, recovery keys, presence, call UI, and browser push notifications.
+- Encrypted files up to 100 MB use chunked client-side encryption and streamed integrity checks. Voice notes remain limited to 20 MB and 60 seconds.
 - Android Capacitor app: the web client in a native shell. Enter your server URL at sign-in. The generic APK does not contain an organization's accounts or server keys.
 - iOS source project: requires a Mac and Xcode to build; no iOS binary is provided.
 - Self-hosting stack: Caddy HTTPS, Synapse, PostgreSQL, browser push gateway, and administrator portal.

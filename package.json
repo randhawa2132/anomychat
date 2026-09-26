@@ -1,11 +1,12 @@
 {
   "name": "anomychat",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
+    "test:media": "node --experimental-strip-types --test tests/media.test.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "admin:local": "node infra/local/admin-server.mjs",
     "mobile:sync": "npm run build && node scripts/sync-native-branding.mjs && cap sync"
@@ -14,6 +15,7 @@
     "@capacitor/android": "^8.5.2",
     "@capacitor/core": "^8.5.2",
     "@capacitor/ios": "^8.5.2",
+    "@noble/hashes": "^2.4.0",
     "matrix-js-sdk": "42.4.0"
   },
   "devDependencies": {
