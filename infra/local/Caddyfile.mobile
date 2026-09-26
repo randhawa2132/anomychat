@@ -1,0 +1,31 @@
+https://{$LAN_HOST}:8443 {
+    tls internal
+    encode zstd gzip
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy no-referrer
+    }
+
+    handle /_matrix/push/* {
+        reverse_proxy push:3000
+    }
+
+    handle /_push/* {
+        reverse_proxy push:3000
+    }
+
+    handle /_matrix/* {
+        reverse_proxy synapse:8008
+    }
+
+    handle /_synapse/client/* {
+        reverse_proxy synapse:8008
+    }
+
+    handle {
+        root * /srv
+        try_files {path} /index.html
+        file_server
+    }
+}

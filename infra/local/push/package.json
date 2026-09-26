@@ -1,0 +1,8 @@
+{
+  "name": "sales-messenger-push-gateway",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "web-push": "3.6.7"
+  }
+}

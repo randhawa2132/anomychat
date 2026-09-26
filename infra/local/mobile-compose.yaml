@@ -1,0 +1,39 @@
+services:
+  synapse:
+    environment:
+      SSL_CERT_FILE: /caddy/caddy/pki/authorities/local/root.crt
+      REQUESTS_CA_BUNDLE: /caddy/caddy/pki/authorities/local/root.crt
+    volumes:
+      - mobile-caddy-data:/caddy:ro
+
+  push:
+    build: ./push
+    restart: unless-stopped
+    environment:
+      PUBLIC_PUSH_GATEWAY_URL: https://${LAN_HOST:?Run mobile-test.ps1 first}:8443/_matrix/push/v1/notify
+      SYNAPSE_URL: http://synapse:8008
+    volumes:
+      - push-data:/data
+    ports:
+      - "127.0.0.1:3001:3000"
+    networks: [private]
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    environment:
+      LAN_HOST: ${LAN_HOST:?Run mobile-test.ps1 first}
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./Caddyfile.mobile:/etc/caddy/Caddyfile:ro
+      - ../../dist:/srv:ro
+      - mobile-caddy-data:/data
+      - mobile-caddy-config:/config
+    depends_on: [synapse, push]
+    networks: [private]
+
+volumes:
+  mobile-caddy-data:
+  mobile-caddy-config:
+  push-data:

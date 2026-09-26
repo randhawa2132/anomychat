@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Admin panel</title>
+    <link rel="icon" type="image/png" href="/preview-icon" />
+    <link rel="stylesheet" href="/admin.css" />
+    <script type="module" src="/admin.js"></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">SERVER ADMINISTRATION</p>
+          <div class="admin-brand"><img id="admin-logo" src="/preview-icon" alt="" /><h1 id="admin-title">Admin panel</h1></div>
+          <p>Manage accounts and rooms from this PC.</p>
+        </div>
+        <a href="/" id="messenger-link">Open messenger</a>
+      </header>
+
+      <p id="notice" role="status" aria-live="polite"></p>
+
+      <section id="login" class="card" aria-labelledby="login-title">
+        <h2 id="login-title">Server administrator sign-in</h2>
+        <form id="login-form">
+          <label>Matrix username <input name="username" autocomplete="username" required placeholder="username" /></label>
+          <label>Password <input name="password" type="password" autocomplete="current-password" required /></label>
+          <button type="submit">Sign in</button>
+        </form>
+      </section>
+
+      <div id="dashboard" hidden>
+        <div class="toolbar">
+          <p>Signed in as <strong id="admin-name"></strong></p>
+          <button id="refresh" type="button">Refresh</button>
+          <button id="logout" type="button" class="secondary">Sign out</button>
+        </div>
+
+        <section class="card" aria-labelledby="health-title">
+          <h2 id="health-title">Server health</h2>
+          <div class="metric-grid">
+            <div><strong id="metric-users">—</strong><span>Accounts</span></div>
+            <div><strong id="metric-active">—</strong><span>Active in 24 hours</span></div>
+            <div><strong id="metric-rooms">—</strong><span>Rooms</span></div>
+            <div><strong id="metric-encrypted">—</strong><span>Encrypted rooms</span></div>
+          </div>
+          <p id="matrix-health"></p>
+          <ul id="services"></ul>
+        </section>
+
+        <section class="card" aria-labelledby="branding-title">
+          <h2 id="branding-title">App branding</h2>
+          <p class="hint">Set the name, color palette, and PNG icon/favicon for this installation. Refresh the messenger on each device after saving.</p>
+          <div class="brand-preview"><img id="branding-icon-preview" src="/preview-icon" alt="Current app icon" /><strong id="branding-name-preview">App name</strong><span>Current saved branding</span></div>
+          <form id="branding-form" class="inline-form">
+            <label>App name <input name="name" maxlength="40" required /></label>
+            <fieldset class="palette-field"><legend>Color palette</legend>
+              <div class="palette-preview" aria-label="Default palette: black, white, and warm clay">
+                <span class="palette-chip" style="--chip:#171514"><i></i> Black <small>#171514</small></span>
+                <span class="palette-chip" style="--chip:#ffffff"><i></i> White <small>#ffffff</small></span>
+                <span class="palette-chip" style="--chip:#d39e80"><i></i> Warm clay <small>#d39e80</small></span>
+              </div>
+              <label>Accent color <input name="accent" type="color" value="#d39e80" required /></label>
+              <button class="secondary" id="reset-palette" type="button">Use warm clay</button>
+            </fieldset>
+            <label>Icon and favicon (PNG, up to 500 KB) <input name="icon" type="file" accept="image/png" /></label>
+            <button type="submit">Save branding changes</button>
+          </form>
+        </section>
+
+        <section class="card" aria-labelledby="accounts-title">
+          <h2 id="accounts-title">Accounts <span id="user-count"></span></h2>
+          <form id="create-form" class="inline-form">
+            <label>New username <input name="username" pattern="[a-z0-9._=-]{1,64}" required placeholder="new_user" /></label>
+            <label>Temporary password <input name="password" type="password" minlength="12" required autocomplete="new-password" /></label>
+            <button type="submit">Create account</button>
+          </form>
+          <p class="hint">Give the password to the user privately. Suspending an account is reversible; deactivation is intentionally unavailable here because it removes device and recovery keys.</p>
+          <label>Find account <input id="user-search" type="search" placeholder="Name or Matrix ID" /></label>
+          <div class="table-wrap"><table><thead><tr><th>Account</th><th>Last active</th><th>Created</th><th>Role</th><th>Status</th><th>Action</th></tr></thead><tbody id="users"></tbody></table></div>
+        </section>
+
+        <section class="card" aria-labelledby="rooms-title">
+          <h2 id="rooms-title">Rooms <span id="room-count"></span></h2>
+          <p class="hint">Room metadata is visible to server admins. End-to-end encrypted message contents are not.</p>
+          <form id="channel-form" class="inline-form">
+            <label>Channel name <input name="name" maxlength="120" required placeholder="Alberta Sales" /></label>
+            <label>Type <select name="kind"><option value="province">Province channel</option><option value="announcements">Company announcements</option></select></label>
+            <label id="province-field">Province or territory <select name="province"><option>Alberta</option><option>British Columbia</option><option>Manitoba</option><option>New Brunswick</option><option>Newfoundland and Labrador</option><option>Northwest Territories</option><option>Nova Scotia</option><option>Nunavut</option><option>Ontario</option><option>Prince Edward Island</option><option>Quebec</option><option>Saskatchewan</option><option>Yukon</option></select></label>
+            <label>Invite Matrix IDs (comma separated) <input name="invite" placeholder="@alice:chat.example.com, @bob:chat.example.com" /></label>
+            <button type="submit">Create encrypted channel</button>
+          </form>
+          <label>Find room <input id="room-search" type="search" placeholder="Name or room ID" /></label>
+          <div class="table-wrap"><table><thead><tr><th>Room</th><th>Members</th><th>Encrypted</th><th>Visibility</th><th>Action</th></tr></thead><tbody id="rooms"></tbody></table></div>
+        </section>
+        <section class="card" aria-labelledby="audit-title">
+          <h2 id="audit-title">Admin action log</h2>
+          <p class="hint">Records account, device, and branding changes made through this local panel. Message contents are never logged here.</p>
+          <div class="table-wrap"><table><thead><tr><th>Time</th><th>Administrator</th><th>Action</th><th>Target</th></tr></thead><tbody id="audit-entries"></tbody></table></div>
+        </section>
+      </div>
+      <dialog id="details-dialog" aria-labelledby="details-title"><h2 id="details-title"></h2><div id="details-body"></div><div id="details-actions"></div><button id="details-close" class="secondary" type="button">Close</button></dialog>
+    </main>
+  </body>
+</html>

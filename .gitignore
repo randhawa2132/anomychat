@@ -1,0 +1,16 @@
+node_modules/
+.npm-cache/
+dist/
+.env
+.env.*
+!.env.example
+infra/local/data/
+infra/local/secrets/
+infra/server/data/
+infra/server/web/
+*.log
+*.jks
+*.keystore
+**/google-services.json
+*.apk
+*.aab

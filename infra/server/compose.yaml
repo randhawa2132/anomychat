@@ -1,0 +1,98 @@
+name: sales-messenger-server
+
+services:
+  postgres:
+    image: postgres:17.10-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: synapse
+      POSTGRES_USER: synapse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run setup.sh first}
+      POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synapse -d synapse"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    networks: [database]
+
+  synapse:
+    image: ghcr.io/element-hq/synapse:v1.161.0
+    restart: unless-stopped
+    user: "${HOST_UID:?Run setup.sh first}:${HOST_GID:?Run setup.sh first}"
+    environment:
+      SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
+    volumes:
+      - ./data/synapse:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [database, edge]
+
+  push:
+    build: ../local/push
+    restart: unless-stopped
+    user: "${HOST_UID:?Run setup.sh first}:${HOST_GID:?Run setup.sh first}"
+    environment:
+      PUBLIC_PUSH_GATEWAY_URL: https://${PUBLIC_HOST:?Run setup.sh first}/_matrix/push/v1/notify
+      SYNAPSE_URL: http://synapse:8008
+      VAPID_SUBJECT: mailto:push@${PUBLIC_HOST:?Run setup.sh first}
+    volumes:
+      - ./data/push:/data
+    depends_on: [synapse]
+    networks: [edge]
+
+  admin:
+    build:
+      context: ../..
+      dockerfile: infra/server/Admin.Dockerfile
+    restart: unless-stopped
+    user: "${HOST_UID:?Run setup.sh first}:${HOST_GID:?Run setup.sh first}"
+    environment:
+      ADMIN_HOMESERVER_URL: http://synapse:8008
+      ADMIN_PUBLIC_DIR: /srv
+      ADMIN_AUDIT_PATH: /data/admin-audit.jsonl
+      ADMIN_LISTEN_HOST: 0.0.0.0
+      ADMIN_SERVER_MODE: "1"
+      ADMIN_PUBLIC_HOST: admin.${PUBLIC_HOST:?Run setup.sh first}
+    ports:
+      - "127.0.0.1:5174:5174"
+    volumes:
+      - ./web:/srv
+      - ./data/admin:/data
+    depends_on: [synapse]
+    networks: [edge]
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?Run setup.sh first}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./web:/srv:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [synapse, push, admin]
+    networks:
+      edge:
+        aliases:
+          - "${PUBLIC_HOST:?Run setup.sh first}"
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  database:
+    internal: true
+  edge:
