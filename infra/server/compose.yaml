@@ -55,6 +55,7 @@ services:
       PUBLIC_PUSH_GATEWAY_URL: https://${PUBLIC_HOST:?Run setup.sh first}/_matrix/push/v1/notify
       SYNAPSE_URL: http://synapse:8008
       VAPID_SUBJECT: mailto:push@${PUBLIC_HOST:?Run setup.sh first}
+      FCM_SERVICE_ACCOUNT_PATH: /data/fcm-service-account.json
     volumes:
       - ./data/push:/data
     depends_on: [synapse]

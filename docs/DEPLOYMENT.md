@@ -51,7 +51,7 @@ In the admin portal, set the web app name, accent color, and PNG icon. These val
 
 ## 5. Calls, push, and production checks
 
-Browser push is opt-in per device in **Settings → Notifications**. The push gateway sends generic alerts, not message text. Native Android/iOS background push is not included. Calls use WebRTC. For reliable calls across mobile carriers, enable the included optional TURN relay:
+Browser push is opt-in per device in **Settings → Notifications**. Android native push requires the Firebase setup in [Android setup](ANDROID.md); iOS native push is not included. The push gateway sends generic alerts, not message text. Calls use WebRTC. For reliable calls across mobile carriers, enable the included optional TURN relay:
 
 ```sh
 cd infra/server

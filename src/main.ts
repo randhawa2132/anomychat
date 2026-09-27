@@ -13,6 +13,7 @@ import { Capacitor } from "@capacitor/core";
 import { bothKeys, flag, key as customKey, localName, migrateStorage, storageKey } from "./events";
 import { decryptMedia, encryptMedia, sameOriginMediaUrl, type EncryptedMedia } from "./media";
 import { disableWebPush, enableWebPush, sendWebPushTest, webPushAvailable, webPushEnabled } from "./notifications";
+import { disableNativePush, enableNativePush, nativePushAvailable, nativePushEnabled, sendNativePushTest } from "./native-notifications";
 import { changeMatrixPassword } from "./password";
 import { primeRingtone, ringtoneEnabled, setRingtoneEnabled, startRingtone, stopRingtone } from "./ringtone";
 import "./style.css";
@@ -829,6 +830,7 @@ async function connect(session: SavedSession): Promise<void> {
   });
   await next.startClient({ initialSyncLimit: 30 });
   renderApp();
+  if (nativePushAvailable() && nativePushEnabled(session.userId)) void enableNativePush(next, session.userId, brandName).catch((error) => setStatus(`Android alerts need attention: ${errorMessage(error)}`));
   void refreshRecoveryState(next);
 }
 
@@ -1797,6 +1799,10 @@ async function signOut(): Promise<void> {
     try { await disableWebPush(old, owner); }
     catch { /* The local push subscription is also removed by disableWebPush. */ }
   }
+  if (old && owner && nativePushEnabled(owner)) {
+    try { await disableNativePush(old, owner); }
+    catch { /* A failed removal can be retried from Android settings. */ }
+  }
   if (activeCall) activeCall.hangup(CallErrorCode.UserHangup, false);
   if (activeVoiceRecorder?.state === "recording") activeVoiceRecorder.stop();
   activeVoiceStream?.getTracks().forEach((track) => track.stop());
@@ -1934,16 +1940,21 @@ function renderApp(): void {
       renderApp();
     });
   } else alerts.disabled = true;
-  const backgroundPush = element("button", "recovery-button", webPushEnabled(currentSession.userId) ? "Disable background push" : "Enable background push");
+  const pushAvailable = nativePushAvailable() || webPushAvailable();
+  const pushEnabled = nativePushAvailable() ? nativePushEnabled(currentSession.userId) : webPushEnabled(currentSession.userId);
+  const backgroundPush = element("button", "recovery-button", pushEnabled ? "Disable background push" : "Enable background push");
   backgroundPush.type = "button";
-  backgroundPush.disabled = !webPushAvailable();
+  backgroundPush.disabled = !pushAvailable;
   backgroundPush.addEventListener("click", async () => {
     const target = client;
     const owner = currentSession?.userId;
     if (!target || !owner) return;
     backgroundPush.disabled = true;
     try {
-      if (webPushEnabled(owner)) { await disableWebPush(target, owner); pushFeedbackText = "Background push disabled on this device."; }
+      if (nativePushAvailable()) {
+        if (nativePushEnabled(owner)) { await disableNativePush(target, owner); pushFeedbackText = "Background push disabled on this device."; }
+        else { await enableNativePush(target, owner, brandName); pushFeedbackText = "Background push enabled. Send a test alert to check your phone."; }
+      } else if (webPushEnabled(owner)) { await disableWebPush(target, owner); pushFeedbackText = "Background push disabled on this device."; }
       else { await enableWebPush(target, owner, brandName); pushFeedbackText = "Background push enabled. Send a test alert to check your phone."; }
     } catch (error) { pushFeedbackText = `Push setup failed: ${errorMessage(error)}`; }
     setStatus(pushFeedbackText);
@@ -1951,13 +1962,13 @@ function renderApp(): void {
   });
   const testBackgroundPush = element("button", "text-button", "Send test alert");
   testBackgroundPush.type = "button";
-  testBackgroundPush.disabled = !webPushAvailable() || !webPushEnabled(currentSession.userId);
+  testBackgroundPush.disabled = !pushAvailable || !pushEnabled;
   testBackgroundPush.addEventListener("click", async () => {
     const target = client;
     const owner = currentSession?.userId;
     if (!target || !owner) return;
     testBackgroundPush.disabled = true;
-    try { await sendWebPushTest(target, owner); pushFeedbackText = "Test alert sent to the push provider. Check this device's notifications."; }
+    try { if (nativePushAvailable()) await sendNativePushTest(target, owner); else await sendWebPushTest(target, owner); pushFeedbackText = "Test alert sent to the push provider. Check this device's notifications."; }
     catch (error) { pushFeedbackText = `Test alert failed: ${errorMessage(error)}`; }
     if (client === target) renderApp();
   });
@@ -2153,8 +2164,8 @@ function renderApp(): void {
       if (!started) { setStatus("Browser audio is blocked. Tap Test ringtone again after interacting with the page."); testRingtone.disabled = false; return; }
       setTimeout(() => { stopRingtone(); testRingtone.disabled = false; }, 4800);
     });
-    notificationSettings.append(element("h2", "", "Notifications"), element("p", "", "Background push sends a generic alert without message text. On iPhone, install the website to the Home Screen before enabling it."), alerts, backgroundPush, testBackgroundPush, element("p", "setting-feedback", pushFeedbackText || (webPushEnabled(currentSession.userId) ? "Background push is enabled on this browser." : "Background push is off on this browser.")), ringtone, testRingtone);
-    if (!webPushAvailable()) notificationSettings.append(element("p", "setting-feedback", "Background push needs the HTTPS LAN website in a supported browser. Native WebView push is not available yet."));
+    notificationSettings.append(element("h2", "", "Notifications"), element("p", "", "Background push sends a generic alert without message text. On iPhone, install the website to the Home Screen before enabling it."), alerts, backgroundPush, testBackgroundPush, element("p", "setting-feedback", pushFeedbackText || (pushEnabled ? "Background push is enabled on this device." : "Background push is off on this device.")), ringtone, testRingtone);
+    if (!pushAvailable) notificationSettings.append(element("p", "setting-feedback", "Background push needs the HTTPS website in a supported browser."));
     const about = element("section", "settings-card");
     const aboutName = element("h2", "", brandName);
     aboutName.dataset.brandName = "";

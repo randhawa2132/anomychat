@@ -18,7 +18,7 @@ The current Compose stack is a single-server installation. It has no high availa
 ## Clients
 
 - Current Chrome, Edge, Firefox, or Safari for the web app. For browser background push, use a supported browser and allow notifications. On iPhone, install the website to the Home Screen.
-- Android 7.0 or newer for the generic APK (`minSdkVersion 24`). The APK needs access to an HTTPS Matrix server. Native background push is not yet implemented.
+- Android 7.0 or newer for the generic APK (`minSdkVersion 24`). The APK needs access to an HTTPS Matrix server. Native background alerts require the Firebase setup in [Android setup](ANDROID.md).
 - iOS source is present but requires macOS and Xcode to build; it has not been validated as a distributable iOS release.
 - Users must preserve their Matrix recovery keys and should verify devices before relying on encrypted history across devices.
 - Encrypted attachments are limited to 100 MB per file. Storage and network use scale with uploaded media; the server allows 110 MB to account for upload overhead.

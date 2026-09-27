@@ -23,6 +23,7 @@ The app is **one installation per organization**. It is not a multi-tenant SaaS 
 4. Open `https://YOUR_DOMAIN/` in a browser, or [install the generic Android APK](docs/ANDROID.md) and enter that same URL at sign-in.
 5. Configure and test [backups and recovery](docs/OPERATIONS.md) before storing important data.
 
+
 ## Develop on any desktop
 
 Requires Node.js 22.12+ and npm. Clone this repository, then:
@@ -41,7 +42,7 @@ Messages in encrypted rooms use Matrix client-side encryption. Files and voice n
 
 ## Important current limits
 
-- Native Android/iOS background push is not integrated; browser Web Push requires opt-in and a supported installed browser app. Messages are generic and contain no plaintext.
+- Android background push requires an APK and server configured with the same Firebase project; see [Android setup](docs/ANDROID.md). iOS native push is not integrated. Browser Web Push requires opt-in and a supported installed browser app. Alerts are generic and contain no plaintext.
 - Device verification is available but not enforced: messages are still sent to unverified devices, and the app warns instead of blocking.
 - Reliable cross-network calls require the optional TURN service in [deployment instructions](docs/DEPLOYMENT.md); it must be configured and reachable through the router.
 - The administrator portal uses Matrix password sign-in without a second factor. Protect administrator accounts and limit exposure according to your risk level.

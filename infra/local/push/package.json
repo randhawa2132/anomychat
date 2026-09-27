@@ -1,8 +1,9 @@
 {
-  "name": "anomychat-push-gateway",
+  "name": "sales-messenger-push-gateway",
   "private": true,
   "type": "module",
   "dependencies": {
+    "google-auth-library": "11.1.0",
     "web-push": "3.6.7"
   }
 }

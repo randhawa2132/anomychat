@@ -3,6 +3,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import webpush from "web-push";
 import { trimSubscriptions } from "./subscriptions.mjs";
+import { createFcm } from "./fcm.mjs";
 
 const dataDir = process.env.PUSH_DATA_DIR || "/data";
 const statePath = `${dataDir}/subscriptions.json`;
@@ -37,6 +38,7 @@ async function loadVapidKeys() {
 }
 const vapid = await loadVapidKeys();
 webpush.setVapidDetails(process.env.VAPID_SUBJECT || "mailto:push@example.com", vapid.publicKey, vapid.privateKey);
+const sendFcm = await createFcm(process.env.FCM_SERVICE_ACCOUNT_PATH || `${dataDir}/fcm-service-account.json`);
 const subscriptions = await readJson(statePath, {});
 let saving = Promise.resolve();
 function save() {
@@ -82,6 +84,9 @@ function equalSecret(a, b) {
   const right = Buffer.from(b);
   return left.length === right.length && timingSafeEqual(left, right);
 }
+function validFcmToken(value) {
+  return typeof value === "string" && value.length >= 20 && value.length <= 4096 && /^[A-Za-z0-9:_-]+$/.test(value);
+}
 // The second entry is the pre-rename app id, still present on older pushers.
 const appIds = ["org.anomychat.web", "com.sales_messenger.web"];
 const recentEvents = new Map();
@@ -90,6 +95,21 @@ const server = createServer(async (request, response) => {
   try {
     const path = new URL(request.url, "http://localhost").pathname;
     if (request.method === "GET" && path === "/_push/v1/public-key") return json(response, 200, { publicKey: vapid.publicKey, gatewayUrl });
+    if (request.method === "POST" && path === "/_push/v1/native-subscriptions") {
+      const owner = await userId(request);
+      if (!owner) return json(response, 401, { error: "Sign in to manage push alerts" });
+      if (!sendFcm) return json(response, 503, { error: "Android alerts need a Firebase service account on this server" });
+      const { registrationToken } = await body(request);
+      if (!validFcmToken(registrationToken)) return json(response, 400, { error: "Invalid Android registration token" });
+      const existing = Object.entries(subscriptions).find(([, item]) => item.owner === owner && item.kind === "fcm" && item.registrationToken === registrationToken);
+      for (const [key, item] of Object.entries(subscriptions)) if (item.kind === "fcm" && item.registrationToken === registrationToken && item.owner !== owner) delete subscriptions[key];
+      const pushKey = existing?.[0] || randomBytes(32).toString("base64url");
+      const token = existing?.[1].token || randomBytes(32).toString("base64url");
+      subscriptions[pushKey] = { owner, token, kind: "fcm", registrationToken };
+      trimSubscriptions(subscriptions, owner);
+      await save();
+      return json(response, 200, { pushKey, token, gatewayUrl });
+    }
     if (path.startsWith("/_push/v1/subscriptions")) {
       const owner = await userId(request);
       if (!owner) return json(response, 401, { error: "Sign in to manage push alerts" });
@@ -101,8 +121,8 @@ const server = createServer(async (request, response) => {
           console.warn("Rejected browser push subscription from host:", host);
           return json(response, 400, { error: "This browser's push provider is unsupported. Use Chrome or Edge on Android, or an installed iPhone Home Screen app." });
         }
-        const existing = Object.entries(subscriptions).find(([, item]) => item.owner === owner && item.subscription.endpoint === subscription.endpoint);
-        for (const [key, item] of Object.entries(subscriptions)) if (item.subscription.endpoint === subscription.endpoint && item.owner !== owner) delete subscriptions[key];
+        const existing = Object.entries(subscriptions).find(([, item]) => item.owner === owner && item.subscription?.endpoint === subscription.endpoint);
+        for (const [key, item] of Object.entries(subscriptions)) if (item.subscription?.endpoint === subscription.endpoint && item.owner !== owner) delete subscriptions[key];
         const pushKey = existing?.[0] || randomBytes(32).toString("base64url");
         const token = existing?.[1].token || randomBytes(32).toString("base64url");
         if (existing) delete subscriptions[pushKey];
@@ -129,7 +149,8 @@ const server = createServer(async (request, response) => {
       recentTests.set(pushKey, Date.now());
       for (const key of recentTests.keys()) if (!subscriptions[key]) recentTests.delete(key);
       try {
-        await webpush.sendNotification(item.subscription, JSON.stringify({ title: "Test alert", body: "Background alerts are ready on this device.", url: "/" }), { TTL: 60, urgency: "normal" });
+        if (item.kind === "fcm") await sendFcm(item.registrationToken, true);
+        else await webpush.sendNotification(item.subscription, JSON.stringify({ title: "Test alert", body: "Background alerts are ready on this device.", url: "/" }), { TTL: 60, urgency: "normal" });
         return json(response, 200, { accepted: true });
       } catch (error) {
         console.warn("Test push failed with provider status:", error.statusCode || "network error");
@@ -143,15 +164,16 @@ const server = createServer(async (request, response) => {
       let transientFailure = false;
       for (const device of notification.devices) {
         const item = subscriptions[device.pushkey];
-        if (!appIds.includes(device.app_id) || !item || !equalSecret(device.data?.gateway_token, item.token)) { rejected.push(device.pushkey); continue; }
+        if (!item || (item.kind === "fcm" ? device.app_id !== "org.anomychat.android" : !appIds.includes(device.app_id)) || !equalSecret(device.data?.gateway_token, item.token)) { rejected.push(device.pushkey); continue; }
         if (!notification.event_id) continue;
         const duplicateKey = `${device.pushkey}:${notification.event_id}`;
         if (recentEvents.has(duplicateKey)) continue;
         try {
-          await webpush.sendNotification(item.subscription, JSON.stringify({ title: "New activity", body: "Open the app to view your encrypted messages.", url: "/" }), { TTL: 3600, urgency: "normal" });
+          if (item.kind === "fcm") await sendFcm(item.registrationToken);
+          else await webpush.sendNotification(item.subscription, JSON.stringify({ title: "New activity", body: "Open the app to view your encrypted messages.", url: "/" }), { TTL: 3600, urgency: "normal" });
           recentEvents.set(duplicateKey, Date.now());
         } catch (error) {
-          if (error.statusCode === 404 || error.statusCode === 410) { delete subscriptions[device.pushkey]; rejected.push(device.pushkey); await save(); }
+          if (error.statusCode === 404 || error.statusCode === 410 || error.code === "messaging/registration-token-not-registered") { delete subscriptions[device.pushkey]; rejected.push(device.pushkey); await save(); }
           else { transientFailure = true; console.warn("Event push failed with provider status:", error.statusCode || "network error"); }
         }
       }
