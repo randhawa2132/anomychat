@@ -14,4 +14,8 @@ if [[ -f "$web/branding.json" ]]; then
 else
   cp -a dist/. "$web/"
 fi
+# Caddy runs without filesystem override capabilities. Static assets must be
+# readable by its container user, including directories copied with a strict umask.
+find "$web" -type d -exec chmod 755 {} +
+find "$web" -type f -exec chmod 644 {} +
 echo "Web assets deployed to $web. Existing server branding preserved."
