@@ -30,7 +30,7 @@ The web client stores its Matrix access token in browser local storage and crypt
 
 ## Calls and limitations
 
-Calls use the Matrix SDK's one-to-one WebRTC implementation in encrypted rooms. Call signalling is room traffic; media uses WebRTC encryption. The app has not undergone an independent call privacy audit. A public TURN service is not provisioned, so calls may fail across carrier networks or strict NAT. No call recording is built in, but participants can record externally. Screen sharing exposes whatever appears on the shared screen.
+Calls use the Matrix SDK's one-to-one WebRTC implementation in encrypted rooms. Call signalling is room traffic; media uses WebRTC encryption. The app has not undergone an independent call privacy audit. An optional TURN relay is included but requires explicit setup; calls may fail across carrier networks or strict NAT until it is configured and tested. The TURN operator sees connection metadata and relays encrypted media. No call recording is built in, but participants can record externally. Screen sharing exposes whatever appears on the shared screen.
 
 ## Risks of hacking or decryption
 

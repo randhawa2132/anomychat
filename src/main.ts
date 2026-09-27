@@ -11,7 +11,7 @@ import { CallEventHandlerEvent } from "matrix-js-sdk/lib/webrtc/callEventHandler
 import type { RoomMessageEventContent } from "matrix-js-sdk/lib/@types/events";
 import { Capacitor } from "@capacitor/core";
 import { bothKeys, flag, key as customKey, localName, migrateStorage, storageKey } from "./events";
-import { decryptMedia, encryptMedia, type EncryptedMedia } from "./media";
+import { decryptMedia, encryptMedia, sameOriginMediaUrl, type EncryptedMedia } from "./media";
 import { disableWebPush, enableWebPush, sendWebPushTest, webPushAvailable, webPushEnabled } from "./notifications";
 import { primeRingtone, ringtoneEnabled, setRingtoneEnabled, startRingtone, stopRingtone } from "./ringtone";
 import "./style.css";
@@ -2731,7 +2731,7 @@ async function loadMediaUrl(eventId: string, media: EncryptedMedia, mime: unknow
   if (cached) return cached;
   const url = target.mxcUrlToHttp(media.url, undefined, undefined, undefined, false, true, true);
   if (!url) throw new Error("Invalid media location.");
-  const response = await fetch(url, { headers: { Authorization: `Bearer ${session.accessToken}` }, redirect: "error" });
+  const response = await fetch(sameOriginMediaUrl(url, session.baseUrl), { headers: { Authorization: `Bearer ${session.accessToken}` }, redirect: "error" });
   if (!response.ok) throw new Error(`Media download returned ${response.status}.`);
   const advertisedSize = Number(response.headers.get("content-length"));
   if (advertisedSize > maxMediaBytes) throw new Error("Attachment exceeds the 100 MB limit.");

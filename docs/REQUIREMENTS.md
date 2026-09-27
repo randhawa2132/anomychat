@@ -13,7 +13,7 @@ AnomyChat is intended for a small, trusted circle or organization that wants to 
 | Software | Docker Engine with Compose plugin, OpenSSL, Git, Node.js 22.12+ for builds, restic for encrypted off-device backups. |
 | Domain | A domain you control. Its Matrix server name becomes part of every user ID and cannot be changed in place after setup. |
 
-The current Compose stack is a single-server installation. It has no high availability, automatic failover, managed device policy, or separate object storage. A GPU is not required. A TURN server is needed for reliable calls across restrictive networks and is not included.
+The current Compose stack is a single-server installation. It has no high availability, automatic failover, managed device policy, or separate object storage. A GPU is not required. Enable the optional TURN service for reliable calls across restrictive networks; it needs a public IPv4 address and additional router ports.
 
 ## Clients
 

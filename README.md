@@ -43,7 +43,7 @@ Messages in encrypted rooms use Matrix client-side encryption. Files and voice n
 
 - Native Android/iOS background push is not integrated; browser Web Push requires opt-in and a supported installed browser app. Messages are generic and contain no plaintext.
 - Device verification is available but not enforced: messages are still sent to unverified devices, and the app warns instead of blocking.
-- Reliable cross-network calls require a separately configured TURN service. This repository does not provision one.
+- Reliable cross-network calls require the optional TURN service in [deployment instructions](docs/DEPLOYMENT.md); it must be configured and reachable through the router.
 - The administrator portal uses Matrix password sign-in without a second factor. Protect administrator accounts and limit exposure according to your risk level.
 - Disappearing messages, view-once media, and screenshot notices are client behaviors, not guarantees against copying or other Matrix clients.
 - Server backups need an off-device destination and an actual restore test. `backup.sh` alone is not disaster recovery.

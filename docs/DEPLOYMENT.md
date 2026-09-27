@@ -49,7 +49,16 @@ In the admin portal, set the web app name, accent color, and PNG icon. These val
 
 ## 5. Calls, push, and production checks
 
-Browser push is opt-in per device in **Settings → Notifications**. The push gateway sends generic alerts, not message text. Native Android/iOS background push is not included. Calls use WebRTC; for reliable calls across mobile carriers, add a public TURN service to Synapse and verify both media directions. This repository does not configure TURN.
+Browser push is opt-in per device in **Settings → Notifications**. The push gateway sends generic alerts, not message text. Native Android/iOS background push is not included. Calls use WebRTC. For reliable calls across mobile carriers, enable the included optional TURN relay:
+
+```sh
+cd infra/server
+bash setup-turn.sh YOUR_PUBLIC_IPV4 YOUR_SERVER_LAN_IPV4
+docker compose --profile turn up -d turn
+docker compose restart synapse
+```
+
+For example, the second address may be `10.0.0.224`; it must be the Ubuntu machine's stable LAN address. Forward **TCP and UDP 3478**, plus **UDP 49160–49200**, from the router to that machine. Allow those ports in the host firewall too. The public address must be the router's current public IPv4, and the app domain must resolve to it. `setup-turn.sh` refuses to overwrite an existing TURN secret; it adds short-lived TURN credentials to Synapse and limits relay access to avoid connections to private network addresses. Keep `data/synapse/turn.secret` and `data/turn/turnserver.conf` in your off-device backup. If the public IPv4 or LAN address changes, update `external-ip`, `listening-ip`, and `relay-ip` in `turnserver.conf`, then restart TURN. Test a voice and video call from mobile data to home Wi-Fi in both directions. A connected call without working audio/video is still a failed test. The generic Android APK cannot receive incoming calls after it is fully closed; native background calling needs a separate Android push service.
 
 Before real use, choose off-device encrypted backup storage and complete a restore rehearsal. See [Operations](OPERATIONS.md). Review [Security](SECURITY.md): the public admin portal does not have built-in MFA. Updates should be tested on a staging server before the live one.
 

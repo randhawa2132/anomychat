@@ -114,6 +114,19 @@ services:
         aliases:
           - "${PUBLIC_HOST:?Run setup.sh first}"
 
+  turn:
+    image: coturn/coturn:4.18.0-r0
+    profiles: [turn]
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./data/turn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    read_only: true
+    tmpfs: [/tmp, /var/lib/coturn]
+    logging: *logging
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
 volumes:
   postgres-data:
   caddy-data:

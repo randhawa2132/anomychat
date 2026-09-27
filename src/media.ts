@@ -8,6 +8,11 @@ export type EncryptedMedia = {
   hashes: { sha256: string };
 };
 
+export function sameOriginMediaUrl(url: string, homeserver: string): string {
+  if (new URL(url).origin !== new URL(homeserver).origin) throw new Error("Media URL is outside this homeserver.");
+  return url;
+}
+
 const chunkBytes = 1024 * 1024; // AES blocks divide this size evenly.
 
 function base64(bytes: Uint8Array): string {
