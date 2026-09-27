@@ -58,6 +58,16 @@ form_secret: "$form_secret"
 trusted_key_servers: []
 federation_domain_whitelist: []
 max_upload_size: 110M
+rc_login:
+  address:
+    per_second: 0.2
+    burst_count: 10
+  account:
+    per_second: 0.2
+    burst_count: 10
+  failed_attempts:
+    per_second: 0.05
+    burst_count: 5
 listeners:
   - port: 8008
     tls: false

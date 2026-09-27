@@ -1,5 +1,5 @@
 {
-  "name": "sales-messenger-push-gateway",
+  "name": "anomychat-push-gateway",
   "private": true,
   "type": "module",
   "dependencies": {

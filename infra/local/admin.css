@@ -54,6 +54,9 @@ th, td { border-bottom-color: #e7e0dc; }
 .palette-preview { display: flex; gap: 10px; flex-wrap: wrap; }
 .palette-chip { display: grid; grid-template-columns: 24px auto; align-items: center; column-gap: 6px; font-size: 12px; font-weight: 700; }
 .palette-chip i { grid-row: span 2; display: block; width: 24px; height: 24px; border: 1px solid #cbbfb8; border-radius: 50%; background: var(--chip); }
+.chip-ink { --chip: #171514; }
+.chip-paper { --chip: #ffffff; }
+.chip-clay { --chip: #d39e80; }
 .palette-chip small { color: #756d69; font-weight: 500; }
 .palette-field input[type="color"] { background: var(--preview-accent, #d39e80); }
 .brand-preview { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 12px 0 20px; }

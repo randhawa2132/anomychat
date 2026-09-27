@@ -1,18 +1,23 @@
 import * as sdk from "matrix-js-sdk";
-import { ClientEvent, MatrixEventEvent, RoomEvent, type MatrixClient, type MatrixEvent, type Room } from "matrix-js-sdk";
+import { ClientEvent, EventStatus, MatrixEventEvent, PushRuleActionName, RoomEvent, UserEvent, type MatrixClient, type MatrixEvent, type Room } from "matrix-js-sdk";
+// The SDK does not re-export its crypto, WebRTC or message-content types from the
+// package root, so those paths stay deep. matrix-js-sdk is pinned to an exact
+// version in package.json because these are internal paths.
 import { decodeRecoveryKey } from "matrix-js-sdk/lib/crypto-api/recovery-key";
 import { deriveRecoveryKeyFromPassphrase } from "matrix-js-sdk/lib/crypto-api/key-passphrase";
+import { CryptoEvent, VerificationPhase, VerificationRequestEvent, VerifierEvent, type ShowSasCallbacks, type VerificationRequest, type Verifier } from "matrix-js-sdk/lib/crypto-api";
 import { CallErrorCode, CallState } from "matrix-js-sdk/lib/webrtc/call";
 import { CallEventHandlerEvent } from "matrix-js-sdk/lib/webrtc/callEventHandler";
-import { EventStatus } from "matrix-js-sdk/lib/models/event-status";
-import { PushRuleActionName } from "matrix-js-sdk/lib/@types/PushRules";
-import { UserEvent } from "matrix-js-sdk/lib/models/user";
 import type { RoomMessageEventContent } from "matrix-js-sdk/lib/@types/events";
 import { Capacitor } from "@capacitor/core";
+import { bothKeys, flag, key as customKey, localName, migrateStorage, storageKey } from "./events";
 import { decryptMedia, encryptMedia, type EncryptedMedia } from "./media";
 import { disableWebPush, enableWebPush, sendWebPushTest, webPushAvailable, webPushEnabled } from "./notifications";
 import { primeRingtone, ringtoneEnabled, setRingtoneEnabled, startRingtone, stopRingtone } from "./ringtone";
 import "./style.css";
+
+// Must run before anything reads stored preferences below.
+try { migrateStorage(localStorage); } catch { /* Private browsing can block storage entirely. */ }
 
 type SavedSession = {
   baseUrl: string;
@@ -22,14 +27,16 @@ type SavedSession = {
   cryptoStorePrefix?: string;
 };
 
-const sessionKey = "sales-messenger-session-v1";
-const notificationsKey = "sales-messenger-notifications-v1";
-const notificationsSeenKey = (userId: string) => `sales-messenger-notifications-seen-v1:${userId}`;
-const themeKey = "sales-messenger-theme-v1";
-const profilePictureAccountData = "com.sales_messenger.profile_picture";
-const pinnedRoomsAccountData = "com.sales_messenger.pinned_rooms";
-const starredMessagesAccountData = "com.sales_messenger.starred_messages";
-const roomWallpapersAccountData = "com.sales_messenger.room_wallpapers";
+const sessionKey = storageKey("session-v1");
+const notificationsKey = storageKey("notifications-v1");
+const notificationsSeenKey = (userId: string) => `${storageKey("notifications-seen-v1")}:${userId}`;
+const themeKey = storageKey("theme-v1");
+const viewedOnceKey = (userId: string) => `${storageKey("viewed-v1")}:${userId}`;
+const viewedOnceLimit = 500;
+const profilePictureAccountData = customKey("profile_picture");
+const pinnedRoomsAccountData = customKey("pinned_rooms");
+const starredMessagesAccountData = customKey("starred_messages");
+const roomWallpapersAccountData = customKey("room_wallpapers");
 const wallpaperChoices = ["default", "clay", "paper", "slate", "midnight"] as const;
 type WallpaperChoice = typeof wallpaperChoices[number];
 type RoomWallpaper = WallpaperChoice | `#${string}`;
@@ -70,9 +77,23 @@ let activeVoiceRecorder: MediaRecorder | null = null;
 let activeVoiceStream: MediaStream | null = null;
 let recoveryState: "checking" | "setup" | "restore" | "ready" = "checking";
 let temporaryRecoveryKey: { id: string; key: Uint8Array<ArrayBuffer> } | null = null;
-const mediaUrls = new Map<string, string>();
+// Decrypted attachments are held as object URLs. Insertion order is eviction
+// order, so the oldest entries are released once the budget is exceeded.
+const mediaUrls = new Map<string, { url: string; bytes: number }>();
+const mediaNodes = new Map<string, HTMLAudioElement>();
+const mediaCacheBudget = 192 * 1024 * 1024;
+const mediaCacheEntries = 24;
+let mediaCacheBytes = 0;
 const loadingPictures = new Set<string>();
 const openingOnce = new Set<string>();
+// Event ids whose object URL an open dialog still needs.
+const pinnedMedia = new Set<string>();
+let viewedOnceIds: string[] = [];
+let openRoomMenu: string | null = null;
+let lastSweepAt = Date.now();
+let verificationDialogRequest: VerificationRequest | null = null;
+// Room id -> user ids in that room that have at least one unverified device.
+const unverifiedMembers = new Map<string, string[]>();
 const lastReadEvents = new Map<string, string>();
 const loadingHistory = new Set<string>();
 const presenceCache = new Map<string, { presence: string; lastSeen?: number }>();
@@ -81,7 +102,7 @@ const disappearingChoices = [0, 60_000, 3_600_000, 86_400_000, 604_800_000] as c
 let lastScreenshotSignal = 0;
 
 function accountRoomKey(kind: string, roomId: string): string {
-  return `sales-messenger-${kind}-v1:${currentSession?.userId || "signed-out"}:${roomId}`;
+  return `${storageKey(`${kind}-v1`)}:${currentSession?.userId || "signed-out"}:${roomId}`;
 }
 function roomClearTime(roomId: string): number {
   const stored = Number(localStorage.getItem(accountRoomKey("clear", roomId)));
@@ -92,40 +113,59 @@ function disappearingDuration(roomId: string): number {
   return disappearingChoices.find((value) => value === stored) ?? 0;
 }
 function messageExpiry(event: MatrixEvent): number | null {
-  const ttl = event.getContent()["com.sales_messenger.expires_in_ms"];
-  return disappearingChoices.includes(ttl) && ttl > 0 ? event.getTs() + ttl : null;
+  const ttl = flag(event.getContent(), "expires_in_ms");
+  return typeof ttl === "number" && disappearingChoices.includes(ttl as never) && ttl > 0 ? event.getTs() + ttl : null;
+}
+function loadViewedOnce(userId: string): void {
+  viewedOnceIds = [];
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(viewedOnceKey(userId)) || "[]");
+    if (Array.isArray(parsed)) viewedOnceIds = parsed.filter((id): id is string => typeof id === "string").slice(0, viewedOnceLimit);
+  } catch { /* An unreadable list means nothing has been opened on this device. */ }
 }
 function viewedOnce(eventId: string): boolean {
-  return localStorage.getItem(`sales-messenger-viewed-v1:${currentSession?.userId}:${eventId}`) === "1";
+  return viewedOnceIds.includes(eventId);
 }
 function markViewedOnce(eventId: string): void {
-  localStorage.setItem(`sales-messenger-viewed-v1:${currentSession?.userId}:${eventId}`, "1");
+  const owner = currentSession?.userId;
+  if (!owner || viewedOnceIds.includes(eventId)) return;
+  // One capped list per account instead of one storage key per attachment.
+  viewedOnceIds = [eventId, ...viewedOnceIds].slice(0, viewedOnceLimit);
+  localStorage.setItem(viewedOnceKey(owner), JSON.stringify(viewedOnceIds));
 }
 function sweepExpiredMessages(): void {
   const target = client;
   const ownId = currentSession?.userId;
   if (!target || !ownId) return;
+  const now = Date.now();
+  let changed = false;
   for (const room of target.getRooms()) {
     if (room.getMyMembership() !== "join") continue;
     for (const event of room.getLiveTimeline().getEvents()) {
       const eventId = event.getId();
       const expires = messageExpiry(event);
-      if (!eventId?.startsWith("$") || event.isRedacted() || event.getSender() !== ownId || !expires || expires > Date.now() || redactionsInFlight.has(eventId)) continue;
+      if (!expires) continue;
+      // A message that expired since the last sweep has to disappear from view.
+      if (room.roomId === activeRoomId && expires > lastSweepAt && expires <= now) changed = true;
+      if (!eventId?.startsWith("$") || event.isRedacted() || event.getSender() !== ownId || expires > now || redactionsInFlight.has(eventId)) continue;
       redactionsInFlight.add(eventId);
+      changed = true;
       void target.redactEvent(room.roomId, eventId).catch(() => {}).finally(() => redactionsInFlight.delete(eventId));
     }
   }
-  if (activeRoomId) renderApp();
+  lastSweepAt = now;
+  // Re-rendering rebuilds the timeline, so only do it when something changed.
+  if (changed && activeRoomId) renderApp();
 }
 setInterval(sweepExpiredMessages, 30000);
 
 function handleViewOnceReceipt(event: MatrixEvent): void {
   const target = client;
   const roomId = event.getRoomId();
-  const eventId = event.getContent()["com.sales_messenger.view_once_receipt"];
+  const eventId = flag(event.getContent(), "view_once_receipt");
   if (!target || !roomId || typeof eventId !== "string" || !eventId.startsWith("$") || event.getSender() === currentSession?.userId) return;
   const original = target.getRoom(roomId)?.getLiveTimeline().getEvents().find((item) => item.getId() === eventId);
-  if (!original || original.isRedacted() || original.getSender() !== currentSession?.userId || original.getContent()["com.sales_messenger.view_once"] !== true || redactionsInFlight.has(eventId)) return;
+  if (!original || original.isRedacted() || original.getSender() !== currentSession?.userId || flag(original.getContent(), "view_once") !== true || redactionsInFlight.has(eventId)) return;
   redactionsInFlight.add(eventId);
   void target.redactEvent(roomId, eventId).catch(() => {}).finally(() => redactionsInFlight.delete(eventId));
 }
@@ -141,7 +181,7 @@ async function logScreenshot(roomId: string): Promise<void> {
     await target.sendMessage(roomId, {
       msgtype: sdk.MsgType.Notice,
       body: `${sender} took a screenshot`,
-      "com.sales_messenger.screenshot": true,
+      [customKey("screenshot")]: true,
     } as RoomMessageEventContent);
     setStatus("Screenshot notice added to the room");
   } catch (error) { setStatus(`Could not log screenshot: ${errorMessage(error)}`); }
@@ -149,9 +189,12 @@ async function logScreenshot(roomId: string): Promise<void> {
 window.addEventListener("keydown", (event) => {
   if (event.key === "PrintScreen" && activeRoomId && activeSection === "chats") void logScreenshot(activeRoomId);
 });
-window.addEventListener("sales-messenger-screenshot", () => {
-  if (activeRoomId && activeSection === "chats") void logScreenshot(activeRoomId);
-});
+// Both spellings: an already-installed APK still dispatches the pre-rename name.
+for (const name of ["anomychat-screenshot", "sales-messenger-screenshot"]) {
+  window.addEventListener(name, () => {
+    if (activeRoomId && activeSection === "chats") void logScreenshot(activeRoomId);
+  });
+}
 
 function presenceLabel(userId: string): string {
   const state = presenceCache.get(userId);
@@ -205,7 +248,9 @@ function applyAccent(): void {
   const strong = [...rgb];
   const surfaceLuminance = dark ? colorLuminance([23, 23, 25]) : 1;
   const target = dark ? 255 : 0;
-  while (contrast(colorLuminance(strong), surfaceLuminance) < 4.5) {
+  // Bounded: rounding can stall one step short of the target, and a hung loop
+  // here would freeze the page.
+  for (let step = 0; step < 64 && contrast(colorLuminance(strong), surfaceLuminance) < 4.5; step++) {
     for (let i = 0; i < 3; i++) strong[i] = Math.round(strong[i] * 0.9 + target * 0.1);
   }
   const strongHex = `#${strong.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
@@ -238,12 +283,63 @@ async function loadBranding(): Promise<void> {
 void loadBranding();
 window.addEventListener("focus", () => void loadBranding());
 document.addEventListener("visibilitychange", () => { if (!document.hidden) void loadBranding(); });
-setInterval(() => { if (!document.hidden) void loadBranding(); }, 15000);
+function releaseMedia(eventId: string): void {
+  const entry = mediaUrls.get(eventId);
+  if (!entry) return;
+  URL.revokeObjectURL(entry.url);
+  mediaCacheBytes -= entry.bytes;
+  mediaUrls.delete(eventId);
+  mediaNodes.delete(eventId);
+}
+
+/** True while something on the page still points at this attachment's object URL. */
+function mediaInUse(eventId: string): boolean {
+  if (pinnedMedia.has(eventId)) return true;
+  const node = mediaNodes.get(eventId);
+  return Boolean(node?.isConnected);
+}
+
+function cacheMediaUrl(eventId: string, url: string, bytes: number): void {
+  releaseMedia(eventId);
+  mediaUrls.set(eventId, { url, bytes });
+  mediaCacheBytes += bytes;
+  // Evict oldest first, never the entry just added, so a decrypted 100 MB file
+  // cannot be kept alive for the rest of the session.
+  for (const oldest of [...mediaUrls.keys()]) {
+    if (mediaCacheBytes <= mediaCacheBudget && mediaUrls.size <= mediaCacheEntries) break;
+    // Revoking a URL that is still in use would break playback or an open
+    // attachment, so the budget gives way to what the page is showing.
+    if (oldest !== eventId && !mediaInUse(oldest)) releaseMedia(oldest);
+  }
+}
+
+function mediaUrlFor(eventId: string): string | undefined {
+  return mediaUrls.get(eventId)?.url;
+}
 
 function clearMediaUrls(): void {
-  for (const url of mediaUrls.values()) URL.revokeObjectURL(url);
+  pinnedMedia.clear();
+  for (const eventId of [...mediaUrls.keys()]) releaseMedia(eventId);
   mediaUrls.clear();
+  mediaNodes.clear();
+  mediaCacheBytes = 0;
   loadingPictures.clear();
+}
+
+/**
+ * Re-renders replace the whole tree, and a freshly created audio element loses
+ * playback position, so the element for a voice message is reused.
+ */
+function voiceElement(eventId: string, url: string, label: string): HTMLAudioElement {
+  const existing = mediaNodes.get(eventId);
+  if (existing && existing.src === url) return existing;
+  const audio = element("audio", "voice-playback");
+  audio.controls = true;
+  audio.preload = "none";
+  audio.src = url;
+  audio.ariaLabel = label;
+  mediaNodes.set(eventId, audio);
+  return audio;
 }
 
 type PictureKind = "room" | "profile";
@@ -251,7 +347,7 @@ function pictureEvent(room: Room, kind: PictureKind, owner?: string): MatrixEven
   return [...room.getLiveTimeline().getEvents()].reverse().find((event) => {
     if (event.isRedacted() || !event.isEncrypted() || event.isDecryptionFailure() || event.getType() !== "m.room.message") return false;
     const content = event.getContent();
-    const marker = content["com.sales_messenger.picture"];
+    const marker = flag(content, "picture") as { kind?: string; owner?: string } | undefined;
     const sender = event.getSender();
     const authorized = kind === "room" ? !!sender && (room.getMember(sender)?.powerLevel ?? 0) >= 50 : marker?.owner === owner && sender === owner;
     return content.msgtype === "m.image" && content.file?.url && ["image/png", "image/jpeg", "image/webp"].includes(content.info?.mimetype) && marker?.kind === kind && authorized;
@@ -265,7 +361,7 @@ function roomAvatar(room: Room, owner?: string): HTMLElement {
 
 function pictureAvatar(event: MatrixEvent | undefined, fallback: string, alt: string): HTMLElement {
   const eventId = event?.getId();
-  const url = eventId && mediaUrls.get(eventId);
+  const url = eventId && mediaUrlFor(eventId);
   if (url) {
     const image = element("img", "room-avatar picture-avatar");
     image.src = url;
@@ -293,7 +389,7 @@ async function loadSavedProfilePicture(target: MatrixClient): Promise<void> {
   const owner = currentSession?.userId;
   if (!owner || client !== target) return;
   try {
-    const data = await target.getAccountDataFromServer(profilePictureAccountData as never) as { refs?: unknown } | null;
+    const data = await readAccountData(target, profilePictureAccountData) as { refs?: unknown } | null;
     if (client !== target) return;
     if (!Array.isArray(data?.refs)) {
       const recent = target.getRooms().flatMap((room) => {
@@ -314,7 +410,7 @@ async function loadSavedProfilePicture(target: MatrixClient): Promise<void> {
         const event = new sdk.MatrixEvent({ ...raw, room_id: ref.roomId, event_id: ref.eventId });
         await target.decryptEventIfNeeded(event);
         const content = event.getContent();
-        const marker = content["com.sales_messenger.picture"];
+        const marker = flag(content, "picture") as { kind?: string; owner?: string } | undefined;
         if (!event.isEncrypted() || event.isDecryptionFailure() || event.getSender() !== owner || event.getType() !== "m.room.message"
           || marker?.kind !== "profile" || marker.owner !== owner || content.msgtype !== "m.image"
           || !content.file?.url || !["image/png", "image/jpeg", "image/webp"].includes(content.info?.mimetype)) continue;
@@ -331,12 +427,13 @@ async function loadSavedProfilePicture(target: MatrixClient): Promise<void> {
 
 function applyPreference(type: string, content: unknown): void {
   const data = content && typeof content === "object" ? content as Record<string, unknown> : {};
-  if (type === pinnedRoomsAccountData) {
+  const name = localName(type);
+  if (name === localName(pinnedRoomsAccountData)) {
     pinnedRoomIds = Array.isArray(data.rooms) ? data.rooms.filter((id): id is string => typeof id === "string").slice(0, 20) : [];
-  } else if (type === starredMessagesAccountData) {
+  } else if (name === localName(starredMessagesAccountData)) {
     starredMessages = Array.isArray(data.messages) ? data.messages.filter((ref): ref is StarredMessage =>
       ref && typeof ref.roomId === "string" && typeof ref.eventId === "string").slice(0, 200) : [];
-  } else if (type === roomWallpapersAccountData) {
+  } else if (name === localName(roomWallpapersAccountData)) {
     roomWallpapers = {};
     if (data.rooms && typeof data.rooms === "object") {
       for (const [roomId, value] of Object.entries(data.rooms)) {
@@ -347,10 +444,18 @@ function applyPreference(type: string, content: unknown): void {
   renderApp();
 }
 
+async function readAccountData(target: MatrixClient, type: string): Promise<unknown> {
+  for (const candidate of bothKeys(localName(type) || type)) {
+    const content = await target.getAccountDataFromServer(candidate as never);
+    if (content) return content;
+  }
+  return null;
+}
+
 async function loadPreferences(target: MatrixClient): Promise<void> {
   for (const type of [pinnedRoomsAccountData, starredMessagesAccountData, roomWallpapersAccountData]) {
     try {
-      const content = await target.getAccountDataFromServer(type as never);
+      const content = await readAccountData(target, type);
       if (client !== target) return;
       applyPreference(type, content);
     } catch { /* Keep the defaults when preferences are unavailable. */ }
@@ -586,11 +691,13 @@ function renderLogin(): void {
         userId: response.user_id,
         accessToken: response.access_token,
         deviceId: response.device_id,
-        cryptoStorePrefix: `sales-messenger:${encodeURIComponent(response.user_id)}:${encodeURIComponent(response.device_id)}`,
+        cryptoStorePrefix: `anomychat:${encodeURIComponent(response.user_id)}:${encodeURIComponent(response.device_id)}`,
       };
+      const password = passInput.value;
       passInput.value = "";
       await connect(session);
       saveSession(session);
+      await ensureCrossSigning(client!, session.userId, { password });
     } catch (error) {
       setStatus(`Sign-in failed: ${loginErrorMessage(error)}`);
       button.disabled = false;
@@ -605,6 +712,7 @@ function renderLogin(): void {
 async function connect(session: SavedSession): Promise<void> {
   stopRingtone();
   pushFeedbackText = "";
+  loadViewedOnce(session.userId);
   notificationsSeenAt = Number(localStorage.getItem(notificationsSeenKey(session.userId))) || Date.now();
   localStorage.setItem(notificationsSeenKey(session.userId), String(notificationsSeenAt));
   if (Capacitor.isNativePlatform() && new URL(session.baseUrl).protocol !== "https:") {
@@ -662,12 +770,14 @@ async function connect(session: SavedSession): Promise<void> {
   });
   next.on(MatrixEventEvent.Decrypted, (event) => {
     handleViewOnceReceipt(event);
-    if (event.getSender() === session.userId && event.getContent()["com.sales_messenger.picture"]?.kind === "profile") void loadSavedProfilePicture(next);
+    if (event.getSender() === session.userId && (flag(event.getContent(), "picture") as { kind?: string } | undefined)?.kind === "profile") void loadSavedProfilePicture(next);
     sweepExpiredMessages(); renderApp();
   });
   next.on(ClientEvent.AccountData, (event) => {
-    if (event.getType() === profilePictureAccountData) void loadSavedProfilePicture(next);
-    else if ([pinnedRoomsAccountData, starredMessagesAccountData, roomWallpapersAccountData].includes(event.getType())) applyPreference(event.getType(), event.getContent());
+    const name = localName(event.getType());
+    if (!name) return;
+    if (name === localName(profilePictureAccountData)) void loadSavedProfilePicture(next);
+    else if ([pinnedRoomsAccountData, starredMessagesAccountData, roomWallpapersAccountData].some((type) => localName(type) === name)) applyPreference(event.getType(), event.getContent());
   });
   next.on(RoomEvent.Receipt, () => renderApp());
   next.on(RoomEvent.LocalEchoUpdated, () => renderApp());
@@ -679,6 +789,13 @@ async function connect(session: SavedSession): Promise<void> {
     renderApp();
   });
   next.on(ClientEvent.DeleteRoom, () => renderApp());
+  next.on(CryptoEvent.VerificationRequestReceived, (request) => {
+    if (client !== next || !request.pending) return;
+    verificationDialog(request, "Device verification requested");
+  });
+  for (const event of [CryptoEvent.DevicesUpdated, CryptoEvent.UserTrustStatusChanged, CryptoEvent.KeysChanged] as const) {
+    next.on(event, () => { if (client === next && activeRoomId) void refreshRoomTrust(activeRoomId); });
+  }
   next.on(CallEventHandlerEvent.Incoming, (call) => {
     if (client !== next) return;
     if (activeCall || !next.getRoom(call.roomId)?.hasEncryptionStateEvent()) { call.reject(); return; }
@@ -750,7 +867,7 @@ function matrixUserId(value: string, currentUserId: string): string {
 }
 
 function roomType(room: Room): string {
-  const state = room.currentState.getStateEvents("com.sales_messenger.room", "");
+  const state = bothKeys("room").map((type) => room.currentState.getStateEvents(type, "")).find((event) => event && !Array.isArray(event));
   const content = state && !Array.isArray(state) ? state.getContent() : null;
   return typeof content?.kind === "string" ? content.kind : "room";
 }
@@ -844,6 +961,195 @@ function inviteForm(roomId: string): void {
   input.focus();
 }
 
+// --- Device verification ----------------------------------------------------
+// Matrix end-to-end encryption only means something if devices are checked, so
+// this device signs itself with cross-signing at sign-in and can verify other
+// devices by comparing emoji (SAS).
+
+/** Password re-auth for uploading cross-signing keys, including the 401 challenge. */
+function passwordAuth(userId: string, password: string) {
+  return async (makeRequest: (auth: sdk.AuthDict | null) => Promise<void>): Promise<void> => {
+    try {
+      await makeRequest(null);
+    } catch (error) {
+      const challenge = error as { httpStatus?: number; data?: { session?: string } };
+      if (challenge.httpStatus !== 401) throw error;
+      await makeRequest({
+        type: "m.login.password",
+        identifier: { type: "m.id.user", user: userId },
+        password,
+        ...(challenge.data?.session ? { session: challenge.data.session } : {}),
+      } as sdk.AuthDict);
+    }
+  };
+}
+
+/**
+ * Publishes and self-signs cross-signing keys so other devices can be verified.
+ * Without a password (a restored session) this can only finish if the recovery
+ * key has already unlocked secret storage.
+ */
+async function ensureCrossSigning(target: MatrixClient, userId: string, options: { password?: string; fromSecretStorage?: boolean } = {}): Promise<void> {
+  const crypto = target.getCrypto();
+  if (!crypto) return;
+  try {
+    if (await crypto.isCrossSigningReady()) return;
+    // Bootstrapping with no way to reach the existing private keys would publish a
+    // new identity and void every verification anyone has already done, so that
+    // case asks for a verification or a recovery key instead.
+    if (!options.fromSecretStorage && await crypto.userHasCrossSigningKeys(userId, true)) {
+      setStatus("This account already has device signing. Verify this device from another of your devices, or restore your recovery key.");
+      return;
+    }
+    await crypto.bootstrapCrossSigning(options.password === undefined ? {} : { authUploadDeviceSigningKeys: passwordAuth(userId, options.password) });
+  } catch (error) {
+    if (client === target) setStatus(`Device signing is not set up yet: ${errorMessage(error)}`);
+  }
+}
+
+function trustLabel(verified: boolean, own: boolean): string {
+  if (verified) return "✓ Verified";
+  return own ? "⚠ Unverified — verify it or sign it out" : "⚠ Unverified";
+}
+
+/** Records which members of a room still have unverified devices. */
+async function refreshRoomTrust(roomId: string): Promise<void> {
+  const target = client;
+  const crypto = target?.getCrypto();
+  const room = target?.getRoom(roomId);
+  const ownId = currentSession?.userId;
+  if (!target || !crypto || !room || !ownId || !room.hasEncryptionStateEvent()) return;
+  try {
+    const devices = await crypto.getUserDeviceInfo(room.getJoinedMembers().map((member) => member.userId));
+    const unverified: string[] = [];
+    for (const [userId, userDevices] of devices) {
+      for (const deviceId of userDevices.keys()) {
+        if (userId === ownId && deviceId === currentSession?.deviceId) continue;
+        const status = await crypto.getDeviceVerificationStatus(userId, deviceId);
+        if (!status?.isVerified()) { unverified.push(userId); break; }
+      }
+    }
+    if (client !== target) return;
+    unverifiedMembers.set(roomId, unverified);
+    if (activeRoomId === roomId) renderApp();
+  } catch { /* Device lists can be unavailable while offline. */ }
+}
+
+function verificationDialog(request: VerificationRequest, title: string): void {
+  if (verificationDialogRequest) { setStatus("Finish the open verification before starting another."); return; }
+  verificationDialogRequest = request;
+  const dialog = recoveryDialog(title);
+  const feedback = element("p", "status", request.initiatedByMe ? "Waiting for the other device to accept…" : "The other device wants to verify.");
+  const codes = element("div", "sas-codes");
+  const actions = element("div", "sas-actions");
+  const close = element("button", "text-button", "Close");
+  close.type = "button";
+  close.addEventListener("click", () => dialog.close());
+  dialog.append(element("p", "muted", "Compare the emoji on both devices in person, or over a channel you already trust. Do not confirm codes read out by someone you cannot identify."), feedback, codes, actions);
+  dialog.addEventListener("close", () => {
+    if (verificationDialogRequest === request) verificationDialogRequest = null;
+    if (request.pending) void request.cancel().catch(() => {});
+  }, { once: true });
+
+  const showSas = (sas: ShowSasCallbacks): void => {
+    if (sas.sas.emoji) {
+      codes.replaceChildren(...sas.sas.emoji.map(([emoji, name]) => {
+        const item = element("div", "sas-code");
+        item.append(element("span", "sas-glyph", emoji), element("small", "", name));
+        return item;
+      }));
+    } else if (sas.sas.decimal) {
+      codes.replaceChildren(element("strong", "sas-decimal", sas.sas.decimal.join(" · ")));
+    }
+    feedback.textContent = "Do these appear in the same order on the other device?";
+    const match = element("button", "primary", "They match");
+    const mismatch = element("button", "danger-button", "They do not match");
+    match.type = mismatch.type = "button";
+    match.addEventListener("click", () => {
+      match.disabled = mismatch.disabled = true;
+      feedback.textContent = "Confirming…";
+      void sas.confirm().catch((error: unknown) => { feedback.textContent = `Could not confirm: ${errorMessage(error)}`; });
+    });
+    mismatch.addEventListener("click", () => {
+      sas.mismatch();
+      feedback.textContent = "Verification cancelled. Treat that device as untrusted.";
+      codes.replaceChildren();
+      actions.replaceChildren(close);
+    });
+    actions.replaceChildren(match, mismatch);
+  };
+
+  let tracked: Verifier | null = null;
+  const track = (verifier: Verifier): void => {
+    if (tracked === verifier) return;
+    tracked = verifier;
+    verifier.on(VerifierEvent.ShowSas, showSas);
+    const pendingSas = verifier.getShowSasCallbacks();
+    if (pendingSas) showSas(pendingSas);
+    verifier.verify().then(() => {
+      feedback.textContent = "Verified. Both devices now trust each other.";
+      codes.replaceChildren();
+      actions.replaceChildren(close);
+      if (activeRoomId) void refreshRoomTrust(activeRoomId);
+      renderApp();
+    }).catch((error: unknown) => {
+      feedback.textContent = `Verification failed: ${errorMessage(error)}`;
+      codes.replaceChildren();
+      actions.replaceChildren(close);
+    });
+  };
+
+  let starting = false;
+  const onChange = (): void => {
+    if (request.verifier) track(request.verifier);
+    else if (request.phase === VerificationPhase.Ready && !starting) {
+      starting = true;
+      void request.startVerification("m.sas.v1").then(track).catch((error: unknown) => {
+        // The other side may have started first; its verifier then arrives by event.
+        if (!request.verifier) feedback.textContent = `Could not start verification: ${errorMessage(error)}`;
+      });
+    }
+    if (request.phase === VerificationPhase.Cancelled) {
+      feedback.textContent = `Verification cancelled${request.cancellationCode ? ` (${request.cancellationCode})` : ""}.`;
+      codes.replaceChildren();
+      actions.replaceChildren(close);
+    }
+  };
+  request.on(VerificationRequestEvent.Change, onChange);
+  dialog.addEventListener("close", () => request.off(VerificationRequestEvent.Change, onChange), { once: true });
+
+  if (!request.initiatedByMe && request.phase === VerificationPhase.Requested) {
+    const accept = element("button", "primary", "Start verification");
+    const decline = element("button", "text-button", "Decline");
+    accept.type = decline.type = "button";
+    accept.addEventListener("click", () => {
+      accept.disabled = true;
+      feedback.textContent = "Accepting…";
+      void request.accept().catch((error: unknown) => { feedback.textContent = `Could not accept: ${errorMessage(error)}`; accept.disabled = false; });
+    });
+    decline.addEventListener("click", () => dialog.close());
+    actions.replaceChildren(accept, decline);
+  }
+  onChange();
+}
+
+async function startDeviceVerification(userId: string, deviceId: string): Promise<void> {
+  const crypto = client?.getCrypto();
+  if (!crypto) return;
+  try {
+    verificationDialog(await crypto.requestDeviceVerification(userId, deviceId), "Verify your other device");
+  } catch (error) { setStatus(`Could not request verification: ${errorMessage(error)}`); }
+}
+
+async function startMemberVerification(roomId: string, userId: string): Promise<void> {
+  const crypto = client?.getCrypto();
+  if (!crypto) return;
+  try {
+    const existing = crypto.findVerificationRequestDMInProgress(roomId, userId);
+    verificationDialog(existing || await crypto.requestVerificationDM(userId, roomId), `Verify ${userId}`);
+  } catch (error) { setStatus(`Could not request verification: ${errorMessage(error)}`); }
+}
+
 async function showDevices(): Promise<void> {
   const target = client;
   const session = currentSession;
@@ -852,16 +1158,33 @@ async function showDevices(): Promise<void> {
   const status = element("p", "status", "Loading devices…");
   dialog.append(status);
   try {
+    const crypto = target.getCrypto();
     const response = await target.getDevices();
     if (client !== target) { dialog.close(); return; }
-    status.textContent = `${response.devices.length} registered device(s). An administrator can revoke a lost device.`;
+    const signingReady = crypto ? await crypto.isCrossSigningReady() : false;
+    if (client !== target) { dialog.close(); return; }
+    status.textContent = `${response.devices.length} registered device(s). Verify each of your devices; an administrator can revoke a lost one.`;
+    if (!signingReady) {
+      dialog.append(element("p", "setting-feedback", "Device signing is not available on this device yet. Verify this device from another of your devices, or restore your recovery key, before verifying others."));
+    }
     const list = element("ul", "member-list");
     for (const device of response.devices) {
       const item = element("li", "member-row");
-      const label = element("span", "", `${device.display_name || "Unnamed device"} · ${device.device_id}${device.device_id === session.deviceId ? " (this device)" : ""}`);
+      const own = device.device_id === session.deviceId;
+      const label = element("span", "", `${device.display_name || "Unnamed device"} · ${device.device_id}${own ? " (this device)" : ""}`);
       const lastSeen = Number(device.last_seen_ts);
       if (Number.isFinite(lastSeen) && lastSeen > 0) label.append(element("small", "", `Last active ${new Date(lastSeen).toLocaleString()}`));
+      const verified = crypto ? Boolean((await crypto.getDeviceVerificationStatus(session.userId, device.device_id))?.isVerified()) : false;
+      if (client !== target) { dialog.close(); return; }
+      label.append(element("small", verified ? "trust-verified" : "trust-unverified", trustLabel(verified, true)));
       item.append(label);
+      if (!verified && !own && signingReady) {
+        const verify = element("button", "text-button", "Verify");
+        verify.type = "button";
+        verify.ariaLabel = `Verify device ${device.device_id}`;
+        verify.addEventListener("click", () => { dialog.close(); void startDeviceVerification(session.userId, device.device_id); });
+        item.append(verify);
+      }
       list.append(item);
     }
     dialog.append(list);
@@ -909,9 +1232,21 @@ function roomDetails(roomId: string): void {
   const list = element("ul", "member-list");
   const self = room.getMember(session.userId);
   const canKick = self && room.currentState.hasSufficientPowerLevelFor("kick", self.powerLevel);
+  const unverified = unverifiedMembers.get(roomId) || [];
   for (const member of room.getJoinedMembers()) {
     const item = element("li", "member-row");
-    item.append(element("span", "", member.userId));
+    const memberLabel = element("span", "", member.userId);
+    if (room.hasEncryptionStateEvent() && unverified.includes(member.userId)) {
+      memberLabel.append(element("small", "trust-unverified", trustLabel(false, member.userId === session.userId)));
+    }
+    item.append(memberLabel);
+    if (member.userId !== session.userId && unverified.includes(member.userId)) {
+      const verify = element("button", "text-button", "Verify");
+      verify.type = "button";
+      verify.ariaLabel = `Verify ${member.userId}`;
+      verify.addEventListener("click", () => { dialog.close(); void startMemberVerification(roomId, member.userId); });
+      item.append(verify);
+    }
     if (canKick && member.userId !== session.userId && self.powerLevel > member.powerLevel) {
       const remove = element("button", "text-button", "Remove");
       remove.type = "button";
@@ -1411,6 +1746,7 @@ function requestRecoveryKey(): void {
       if (client !== target) return;
       dialog.close();
       setStatus(`Recovery finished: ${result.imported} message keys restored.`);
+      await ensureCrossSigning(target, target.getUserId() || "", { fromSecretStorage: true });
       await refreshRecoveryState(target);
       await loadSavedProfilePicture(target);
       renderApp();
@@ -1459,6 +1795,9 @@ async function signOut(): Promise<void> {
   lastReadEvents.clear();
   loadingHistory.clear();
   presenceCache.clear();
+  viewedOnceIds = [];
+  openRoomMenu = null;
+  unverifiedMembers.clear();
   localStorage.removeItem(sessionKey);
   old?.stopClient();
   try { await old?.logout(); } catch { /* Local sign-out still succeeds offline. */ }
@@ -1481,7 +1820,7 @@ function activityNotifications(): ActivityNotification[] {
       if (event.isDecryptionFailure()) return [{ roomId: room.roomId, title: "Encrypted activity", detail: room.name, timestamp: event.getTs() }];
       const content = event.getContent();
       if (event.getType() === "m.call.invite") return [{ roomId: room.roomId, title: "Incoming call", detail: room.name, timestamp: event.getTs() }];
-      if (event.getType() !== "m.room.message" || content["com.sales_messenger.picture"] || content["com.sales_messenger.view_once_receipt"] || content["com.sales_messenger.screenshot"]) return [];
+      if (event.getType() !== "m.room.message" || flag(content, "picture") || flag(content, "view_once_receipt") || flag(content, "screenshot")) return [];
       if (messageExpiry(event) && messageExpiry(event)! <= Date.now()) return [];
       const mentioned = Array.isArray(content["m.mentions"]?.user_ids) && content["m.mentions"].user_ids.includes(ownId);
       return [{ roomId: room.roomId, title: mentioned ? "You were mentioned" : "New message", detail: room.name, timestamp: event.getTs() }];
@@ -1630,7 +1969,7 @@ function renderApp(): void {
     text.append(element("strong", "", room.name), element("small", "", room.getMyMembership() === "invite" ? "Invitation" : unread ? `${unread} unread · ${category}` : room.hasEncryptionStateEvent() ? category : "Unencrypted room"));
     row.append(text);
     if (pinnedRoomIds.includes(room.roomId)) row.append(element("span", "room-pin", "📌"));
-    row.addEventListener("click", () => { activeRoomId = room.roomId; markRoomRead(room.roomId); renderApp(); void refreshRoomPresence(room.roomId); });
+    row.addEventListener("click", () => { activeRoomId = room.roomId; markRoomRead(room.roomId); renderApp(); void refreshRoomPresence(room.roomId); void refreshRoomTrust(room.roomId); });
     roomList.append(row);
   }
   if (rooms.length === 0) roomList.append(element("p", "empty-list", "No rooms yet. Create an encrypted room to begin."));
@@ -1771,7 +2110,7 @@ function renderApp(): void {
       const row = element("button", "notification-row");
       row.type = "button";
       row.append(element("strong", "", item.title), element("span", "", item.detail), element("small", "", new Date(item.timestamp).toLocaleString()));
-      row.addEventListener("click", () => { activeSection = "chats"; activeRoomId = item.roomId; markRoomRead(item.roomId); renderApp(); void refreshRoomPresence(item.roomId); });
+      row.addEventListener("click", () => { activeSection = "chats"; activeRoomId = item.roomId; markRoomRead(item.roomId); renderApp(); void refreshRoomPresence(item.roomId); void refreshRoomTrust(item.roomId); });
       panel.append(row);
     }
     content.append(panel);
@@ -1790,7 +2129,7 @@ function renderApp(): void {
       const historyIcon = element("span", "history-icon", isVideo ? "" : "☎");
       if (isVideo) historyIcon.append(videoCameraIcon());
       row.append(historyIcon, element("span", "", `${callRoom.name} · ${isVideo ? "Video" : "Voice"} call`), element("small", "", new Date(event.getTs()).toLocaleString()));
-      row.addEventListener("click", () => { activeSection = "chats"; activeRoomId = callRoom.roomId; renderApp(); void refreshRoomPresence(callRoom.roomId); });
+      row.addEventListener("click", () => { activeSection = "chats"; activeRoomId = callRoom.roomId; renderApp(); void refreshRoomPresence(callRoom.roomId); void refreshRoomTrust(callRoom.roomId); });
       panel.append(row);
     }
     content.append(panel);
@@ -1817,6 +2156,8 @@ function renderApp(): void {
     heading.append(headingText);
     const roomActions = element("div", "room-actions");
     const more = element("details", "room-menu");
+    more.open = openRoomMenu === room.roomId;
+    more.addEventListener("toggle", () => { openRoomMenu = more.open ? room.roomId : null; });
     const moreLabel = element("summary", "", "⋮");
     moreLabel.ariaLabel = "More room options";
     moreLabel.title = "More room options";
@@ -1893,6 +2234,16 @@ function renderApp(): void {
     } else if (!room.hasEncryptionStateEvent()) {
       content.append(element("div", "warning", "This room is not encrypted. Messaging is disabled here."));
     } else {
+      const unverified = unverifiedMembers.get(room.roomId) || [];
+      if (unverified.length) {
+        const warning = element("div", "warning trust-warning");
+        warning.append(element("strong", "", "Unverified devices in this room"), element("span", "", `Messages are still encrypted, but ${unverified.join(", ")} ${unverified.length === 1 ? "has" : "have"} at least one device this device has not verified. Verify before trusting who is reading this room.`));
+        const openDetails = element("button", "text-button", "Review members");
+        openDetails.type = "button";
+        openDetails.addEventListener("click", () => roomDetails(room.roomId));
+        warning.append(openDetails);
+        content.append(warning);
+      }
       const timeline = element("div", "timeline");
       timeline.dataset.roomId = room.roomId;
       const wallpaper = roomWallpapers[room.roomId] || "default";
@@ -1929,15 +2280,16 @@ function renderApp(): void {
         const bubble = element("article", `message${own ? " own" : ""}`);
         bubble.append(element("small", "sender", event.getSender() || "Unknown"));
         const message = event.getContent();
-        if (message["com.sales_messenger.picture"]) {
-          timeline.append(element("div", "call-entry", `${message["com.sales_messenger.picture"].kind === "room" ? "Room" : "Profile"} picture updated by ${event.getSender() || "Unknown"}`));
+        const pictureMarker = flag(message, "picture") as { kind?: string } | undefined;
+        if (pictureMarker) {
+          timeline.append(element("div", "call-entry", `${pictureMarker.kind === "room" ? "Room" : "Profile"} picture updated by ${event.getSender() || "Unknown"}`));
           continue;
         }
-        if (message["com.sales_messenger.screenshot"] === true) {
+        if (flag(message, "screenshot") === true) {
           timeline.append(element("div", "call-entry", `${event.getSender() || "Unknown"} took a screenshot · ${new Date(event.getTs()).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`));
           continue;
         }
-        if (message["com.sales_messenger.view_once_receipt"]) {
+        if (flag(message, "view_once_receipt")) {
           timeline.append(element("div", "call-entry", `View-once attachment opened by ${event.getSender() || "Unknown"}`));
           continue;
         }
@@ -1947,7 +2299,7 @@ function renderApp(): void {
         const isMedia = message.msgtype === "m.image" || message.msgtype === "m.file" || message.msgtype === "m.audio";
         if (event.isDecryptionFailure()) {
           bubble.append(element("p", "", "Unable to decrypt on this device. Older messages may need key recovery."));
-        } else if (isMedia && media?.url && eventId && message["com.sales_messenger.view_once"] === true) {
+        } else if (isMedia && media?.url && eventId && flag(message, "view_once") === true) {
           bubble.append(element("p", "", `View-once: ${body}`));
           if (own) bubble.append(element("small", "muted", "Waiting for recipient to open"));
           else if (viewedOnce(eventId)) bubble.append(element("small", "muted", "Already opened on this device"));
@@ -1959,14 +2311,9 @@ function renderApp(): void {
           }
         } else if (isMedia && media?.url && eventId) {
           bubble.append(element("p", "", body));
-          const cachedUrl = mediaUrls.get(eventId);
+          const cachedUrl = mediaUrlFor(eventId);
           if (cachedUrl && message.msgtype === "m.audio") {
-            const audio = element("audio", "voice-playback");
-            audio.controls = true;
-            audio.preload = "none";
-            audio.src = cachedUrl;
-            audio.ariaLabel = `Voice message from ${event.getSender() || "unknown"}`;
-            bubble.append(audio);
+            bubble.append(voiceElement(eventId, cachedUrl, `Voice message from ${event.getSender() || "unknown"}`));
           } else if (cachedUrl && message.msgtype === "m.image") {
             const preview = element("img", "media-image");
             preview.src = cachedUrl;
@@ -2009,7 +2356,7 @@ function renderApp(): void {
           info.addEventListener("click", () => showMessageInfo(room, event));
           meta.append(info);
         }
-        if (eventId?.startsWith("$") && !event.isDecryptionFailure() && message["com.sales_messenger.view_once"] !== true && !messageExpiry(event)) {
+        if (eventId?.startsWith("$") && !event.isDecryptionFailure() && flag(message, "view_once") !== true && !messageExpiry(event)) {
           const starred = starredMessages.some((ref) => ref.roomId === room.roomId && ref.eventId === eventId);
           const star = element("button", `message-action star-action${starred ? " starred" : ""}`, starred ? "★" : "☆");
           star.type = "button";
@@ -2101,7 +2448,7 @@ function renderApp(): void {
           await client.sendMessage(room.roomId, {
             msgtype: sdk.MsgType.Text,
             body,
-            ...(ttl ? { "com.sales_messenger.expires_in_ms": ttl } : {}),
+            ...(ttl ? { [customKey("expires_in_ms")]: ttl } : {}),
           } as RoomMessageEventContent);
           draftTextByRoom.delete(room.roomId); input.value = ""; setStatus("Message sent"); renderApp();
         }
@@ -2212,8 +2559,8 @@ async function sendMedia(roomId: string, file: File, voiceDurationMs?: number, v
       filename: file.name || "Attachment",
       file: { ...encrypted.details, url: uploaded.content_uri },
       info: { mimetype: file.type || "application/octet-stream", size: file.size, ...(voiceDurationMs === undefined ? {} : { duration: voiceDurationMs }) },
-      ...(disappearingDuration(roomId) ? { "com.sales_messenger.expires_in_ms": disappearingDuration(roomId) } : {}),
-      ...(viewOnce ? { "com.sales_messenger.view_once": true } : {}),
+      ...(disappearingDuration(roomId) ? { [customKey("expires_in_ms")]: disappearingDuration(roomId) } : {}),
+      ...(viewOnce ? { [customKey("view_once")]: true } : {}),
     };
     if (voiceDurationMs !== undefined) await target.sendMessage(roomId, { ...content, body: "Voice message", msgtype: sdk.MsgType.Audio });
     else if (previewableImage(file.type)) await target.sendMessage(roomId, { ...content, msgtype: sdk.MsgType.Image });
@@ -2249,7 +2596,7 @@ async function sendSecurePicture(roomIds: string[], file: File, kind: PictureKin
       msgtype: sdk.MsgType.Image,
       file: { ...encrypted.details, url: uploaded.content_uri },
       info: { mimetype: file.type, size: file.size },
-      "com.sales_messenger.picture": { kind, owner },
+      [customKey("picture")]: { kind, owner },
     };
     let sent = 0;
     const refs: { roomId: string; eventId: string }[] = [];
@@ -2373,7 +2720,7 @@ async function loadMediaUrl(eventId: string, media: EncryptedMedia, mime: unknow
   const target = client;
   const session = currentSession;
   if (!target || !session) throw new Error("Sign in to view this picture.");
-  const cached = mediaUrls.get(eventId);
+  const cached = mediaUrlFor(eventId);
   if (cached) return cached;
   const url = target.mxcUrlToHttp(media.url, undefined, undefined, undefined, false, true, true);
   if (!url) throw new Error("Invalid media location.");
@@ -2385,7 +2732,7 @@ async function loadMediaUrl(eventId: string, media: EncryptedMedia, mime: unknow
   const plaintext = await decryptMedia(response.body, media, maxMediaBytes);
   if (client !== target) throw new Error("Account changed during download.");
   const objectUrl = URL.createObjectURL(new Blob([plaintext], { type: typeof mime === "string" ? mime : "application/octet-stream" }));
-  mediaUrls.set(eventId, objectUrl);
+  cacheMediaUrl(eventId, objectUrl, plaintext.size);
   return objectUrl;
 }
 
@@ -2405,6 +2752,7 @@ async function openOnceMedia(roomId: string, eventId: string, media: EncryptedMe
   try {
     const url = await loadMediaUrl(eventId, media, mime);
     if (viewedOnce(eventId)) return;
+    pinnedMedia.add(eventId);
     const dialog = recoveryDialog("View once");
     dialog.append(element("p", "", "This app will hide the attachment after this opening. A recipient can still save or capture it."));
     const consume = () => {
@@ -2415,7 +2763,7 @@ async function openOnceMedia(roomId: string, eventId: string, media: EncryptedMe
         void target.sendMessage(roomId, {
           msgtype: sdk.MsgType.Notice,
           body: "View-once attachment opened",
-          "com.sales_messenger.view_once_receipt": eventId,
+          [customKey("view_once_receipt")]: eventId,
         } as RoomMessageEventContent).catch(() => {});
       }
       renderApp();
@@ -2443,10 +2791,7 @@ async function openOnceMedia(roomId: string, eventId: string, media: EncryptedMe
     close.type = "button";
     close.addEventListener("click", () => dialog.close());
     dialog.append(close);
-    dialog.addEventListener("close", () => {
-      mediaUrls.delete(eventId);
-      URL.revokeObjectURL(url);
-    }, { once: true });
+    dialog.addEventListener("close", () => { pinnedMedia.delete(eventId); releaseMedia(eventId); }, { once: true });
   } catch (error) { setStatus(`Could not open once: ${errorMessage(error)}`); }
   finally { openingOnce.delete(eventId); }
 }

@@ -27,8 +27,11 @@ async function api(path, method = "GET", body) {
     headers: body === undefined ? {} : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || `Request failed (${response.status}).`);
+  // A proxy error page is not JSON, so do not let the parse failure surface instead
+  // of the status.
+  const data = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(data?.error || `Request failed (${response.status}).`);
+  if (!data) throw new Error("The admin service returned an unexpected response.");
   return data;
 }
 
@@ -248,23 +251,31 @@ $("create-form").addEventListener("submit", async (event) => {
 });
 
 $("channel-form").elements.kind.addEventListener("change", (event) => {
-  $("province-field").hidden = event.target.value !== "province";
+  const province = event.target.value === "province";
+  $("province-field").hidden = !province;
+  $("channel-form").elements.invite.required = province;
 });
 $("channel-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.target;
   const button = form.querySelector("button[type=submit]");
   button.disabled = true;
+  const kind = form.elements.kind.value;
   try {
     const result = await api("/api/channels", "POST", {
       name: form.elements.name.value,
-      kind: form.elements.kind.value,
+      kind,
       province: form.elements.province.value,
       invite: form.elements.invite.value.split(",").map((value) => value.trim()).filter(Boolean),
     });
     form.reset();
+    // reset() restores the province kind, which requires an invitee.
     $("province-field").hidden = false;
-    notice(`Created encrypted channel ${result.roomId}. Invitees can join it in the messenger.`);
+    form.elements.invite.required = true;
+    const staysJoined = kind === "announcements"
+      ? " Your administrator account stays in this announcement room to post, so it also receives that room's message keys."
+      : " Warning: your administrator account could not leave this province channel, so it still receives that room's message keys. Leave it from a messenger client.";
+    notice(`Created encrypted channel ${result.roomId}. Invitees can join it in the messenger.${result.adminJoined ? staysJoined : ""}`);
     await refresh();
   } catch (error) { notice(error.message, true); }
   finally { button.disabled = false; }

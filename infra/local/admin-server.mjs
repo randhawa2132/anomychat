@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
-import { appendFile, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { execFile } from "node:child_process";
@@ -21,9 +21,43 @@ const publicHost = process.env.ADMIN_PUBLIC_HOST;
 if (publicHost) allowedHosts.add(publicHost);
 const provinces = new Set(["Alberta", "British Columbia", "Manitoba", "New Brunswick", "Newfoundland and Labrador", "Northwest Territories", "Nova Scotia", "Nunavut", "Ontario", "Prince Edward Island", "Quebec", "Saskatchewan", "Yukon"]);
 const auditPath = process.env.ADMIN_AUDIT_PATH || join(directory, "data", "admin-audit.jsonl");
+await mkdir(dirname(auditPath), { recursive: true }).catch((error) => console.error("Could not create the admin audit directory", error));
+const loginFailures = new Map();
+const loginFailureLimit = 5;
+const loginFailureWindowMs = 15 * 60 * 1000;
 
 async function audit(actor, action, target) {
-  await appendFile(auditPath, `${JSON.stringify({ at: new Date().toISOString(), actor, action, target })}\n`, { mode: 0o600 });
+  try {
+    await appendFile(auditPath, `${JSON.stringify({ at: new Date().toISOString(), actor, action, target })}\n`, { mode: 0o600 });
+  } catch (error) {
+    // The change already happened; failing the response here would misreport it.
+    console.error("Could not write the admin audit log", error);
+  }
+}
+
+/** Client address, taken from the proxy only when this panel runs behind one. */
+function clientAddress(request) {
+  if (publicHost && request.headers.host === publicHost) {
+    const forwarded = request.headers["x-forwarded-for"];
+    // Caddy appends the immediate peer, so the last entry is the trustworthy one.
+    const last = forwarded?.split(",").pop()?.trim();
+    if (last) return last;
+  }
+  return request.socket.remoteAddress || "unknown";
+}
+
+function loginThrottle(address) {
+  const entry = loginFailures.get(address);
+  if (!entry || Date.now() - entry.first > loginFailureWindowMs) return null;
+  if (entry.count < loginFailureLimit) return null;
+  return Math.max(1, Math.ceil((loginFailureWindowMs - (Date.now() - entry.first)) / 60000));
+}
+
+function recordLoginFailure(address) {
+  const entry = loginFailures.get(address);
+  if (!entry || Date.now() - entry.first > loginFailureWindowMs) loginFailures.set(address, { first: Date.now(), count: 1 });
+  else entry.count += 1;
+  for (const [key, value] of loginFailures) if (Date.now() - value.first > loginFailureWindowMs) loginFailures.delete(key);
 }
 
 class RequestError extends Error {
@@ -66,12 +100,13 @@ async function requestBody(request, limit = 8192) {
   }
 }
 
-async function matrix(path, token, method = "GET", body) {
+async function matrix(path, token, method = "GET", body, forwardedFor) {
   const response = await fetch(new URL(path, homeserver), {
     method,
     headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      ...(forwardedFor ? { "X-Forwarded-For": forwardedFor } : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(10000),
@@ -84,8 +119,8 @@ async function matrix(path, token, method = "GET", body) {
 }
 
 function cookie(request) {
-  const entry = request.headers.cookie?.split(";").map((part) => part.trim()).find((part) => part.startsWith("sm_admin="));
-  return entry?.slice("sm_admin=".length) || null;
+  const entry = request.headers.cookie?.split(";").map((part) => part.trim()).find((part) => part.startsWith("anomychat_admin="));
+  return entry?.slice("anomychat_admin=".length) || null;
 }
 
 function currentSession(request) {
@@ -151,11 +186,10 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && path === "/admin.js") return await serveFile(response, "admin.js", "text/javascript; charset=utf-8");
     if (request.method === "GET" && path === "/admin.css") return await serveFile(response, "admin.css", "text/css; charset=utf-8");
     if (request.method === "GET" && path === "/preview-icon") {
-      const branding = JSON.parse(await readFile(join(publicDir, "branding.json"), "utf8"));
+      const branding = await readFile(join(publicDir, "branding.json"), "utf8").then(JSON.parse).catch(() => ({}));
       const custom = typeof branding.icon === "string" && branding.icon.startsWith("/branding-icon.png");
-      const bytes = await readFile(custom
-        ? join(publicDir, "branding-icon.png")
-        : join(publicDir, "icons", "icon-192.png"));
+      const fallback = join(publicDir, "icons", "icon-192.png");
+      const bytes = await readFile(custom ? join(publicDir, "branding-icon.png") : fallback).catch(() => readFile(fallback));
       response.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
       response.end(bytes);
       return;
@@ -169,12 +203,21 @@ const server = createServer(async (request, response) => {
       if (typeof body.username !== "string" || typeof body.password !== "string" || !body.username || !body.password) {
         throw new RequestError(400, "Enter an administrator username and password.");
       }
-      const login = await matrix("/_matrix/client/v3/login", null, "POST", {
-        type: "m.login.password",
-        identifier: { type: "m.id.user", user: body.username },
-        password: body.password,
-        initial_device_display_name: "Admin panel",
-      });
+      const address = clientAddress(request);
+      const waitMinutes = loginThrottle(address);
+      if (waitMinutes !== null) throw new RequestError(429, `Too many failed sign-ins from this address. Try again in ${waitMinutes} minute(s).`);
+      let login;
+      try {
+        login = await matrix("/_matrix/client/v3/login", null, "POST", {
+          type: "m.login.password",
+          identifier: { type: "m.id.user", user: body.username },
+          password: body.password,
+          initial_device_display_name: "Admin panel",
+        }, address);
+      } catch (error) {
+        if (error instanceof RequestError && [401, 403].includes(error.status)) recordLoginFailure(address);
+        throw error;
+      }
       if (!login.access_token || !login.user_id) throw new RequestError(502, "Matrix login did not return a session.");
       try {
         const account = await matrix(`/_synapse/admin/v2/users/${encodeURIComponent(login.user_id)}`, login.access_token);
@@ -183,10 +226,11 @@ const server = createServer(async (request, response) => {
         await matrix("/_matrix/client/v3/logout", login.access_token, "POST", {}).catch(() => {});
         throw error;
       }
+      loginFailures.delete(address);
       const id = randomBytes(32).toString("base64url");
       sessions.set(id, { token: login.access_token, userId: login.user_id, lastUsed: Date.now() });
       return reply(response, 200, { userId: login.user_id }, {
-        "Set-Cookie": `sm_admin=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=1800${request.headers.host === publicHost ? "; Secure" : ""}`,
+        "Set-Cookie": `anomychat_admin=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=1800${request.headers.host === publicHost ? "; Secure" : ""}`,
       });
     }
 
@@ -195,7 +239,7 @@ const server = createServer(async (request, response) => {
       const session = id && sessions.get(id);
       if (id) sessions.delete(id);
       if (session) await matrix("/_matrix/client/v3/logout", session.token, "POST", {}).catch(() => {});
-      return reply(response, 200, { ok: true }, { "Set-Cookie": `sm_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${request.headers.host === publicHost ? "; Secure" : ""}` });
+      return reply(response, 200, { ok: true }, { "Set-Cookie": `anomychat_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${request.headers.host === publicHost ? "; Secure" : ""}` });
     }
 
     const session = currentSession(request);
@@ -253,12 +297,19 @@ const server = createServer(async (request, response) => {
         total = data.total || users.length;
         nextToken = data.next_token;
       } while (nextToken && users.length < 1000);
-      // Synapse's list response omits suspension state; the detail endpoint includes it.
-      for (let offset = 0; offset < users.length; offset += 8) {
-        await Promise.all(users.slice(offset, offset + 8).map(async (user) => {
-          const detail = await matrix(`/_synapse/admin/v2/users/${encodeURIComponent(user.name)}`, session.token);
-          user.suspended = detail.suspended ?? false;
-        }));
+      // Current Synapse reports suspension in the list. Older versions do not, and
+      // then each account needs its own lookup.
+      // ponytail: per-user fallback is O(accounts) requests; cache it server-side if
+      // an old Synapse ever has to serve a large directory.
+      if (!users.some((user) => user.suspended !== undefined)) {
+        for (let offset = 0; offset < users.length; offset += 8) {
+          await Promise.all(users.slice(offset, offset + 8).map(async (user) => {
+            const detail = await matrix(`/_synapse/admin/v2/users/${encodeURIComponent(user.name)}`, session.token);
+            user.suspended = detail.suspended ?? false;
+          }));
+        }
+      } else {
+        for (const user of users) user.suspended = user.suspended ?? false;
       }
       return reply(response, 200, { users, total, truncated: Boolean(nextToken) });
     }
@@ -303,30 +354,57 @@ const server = createServer(async (request, response) => {
           !body.name.trim() || body.name.length > 120 || /[<>\r\n]/.test(body.name) ||
           (body.kind === "province" && !provinces.has(body.province)) ||
           !Array.isArray(body.invite) || body.invite.length > 100 ||
+          (body.kind === "province" && body.invite.length === 0) ||
           body.invite.some((id) => typeof id !== "string" || !/^@[a-z0-9._=-]{1,64}:.+$/.test(id) || !id.endsWith(`:${serverName}`))) {
-        throw new RequestError(400, "Enter a channel name, valid type and province, and up to 100 local Matrix users.");
+        throw new RequestError(400, "Enter a channel name, valid type and province, and up to 100 local Matrix users. A province channel needs at least one invitee, because this account does not stay in it.");
       }
       const announcement = body.kind === "announcements";
+      const invite = [...new Set(body.invite)];
       const created = await matrix("/_matrix/client/v3/createRoom", session.token, "POST", {
-        name: body.name.trim(), visibility: "private", preset: "private_chat", invite: [...new Set(body.invite)],
+        name: body.name.trim(), visibility: "private", preset: "private_chat", invite,
         topic: announcement ? "Company announcements · administrators post" : `Province channel · ${body.province}`,
-        ...(announcement ? { power_level_content_override: { users: { [session.userId]: 100 }, users_default: 0,
-          events_default: 50, state_default: 50, invite: 50, kick: 50, ban: 50, redact: 50,
-          events: { "m.room.encrypted": 50, "m.room.message": 50 } } } : {}),
+        // An announcement room keeps the administrator as its only poster. A province
+        // channel is handed to its members so the administrator can leave it, because
+        // every joined member receives the room's encryption keys.
+        power_level_content_override: announcement
+          ? { users: { [session.userId]: 100 }, users_default: 0,
+            events_default: 50, state_default: 50, invite: 50, kick: 50, ban: 50, redact: 50,
+            events: { "m.room.encrypted": 50, "m.room.message": 50 } }
+          // The first invitee becomes the channel's moderator: this account leaves, and
+          // a room whose highest joined level is 50 has nobody able to remove a member.
+          : { users: { [session.userId]: 100, ...Object.fromEntries(invite.map((id) => [id, 50])), [invite[0]]: 100 },
+            users_default: 0, events_default: 0, state_default: 50, invite: 50, kick: 50, ban: 50, redact: 50 },
         initial_state: [
           { type: "m.room.encryption", state_key: "", content: { algorithm: "m.megolm.v1.aes-sha2" } },
-          { type: "com.sales_messenger.room", state_key: "", content: { kind: body.kind, ...(announcement ? {} : { province: body.province }) } },
+          { type: "org.anomychat.room", state_key: "", content: { kind: body.kind, ...(announcement ? {} : { province: body.province }) } },
         ],
       });
       await audit(session.userId, "create-channel", `${created.room_id} / ${body.kind}`);
-      return reply(response, 201, { roomId: created.room_id });
+      // Every joined member receives the room's encryption keys, so this account
+      // leaves the channels it does not have to post in.
+      let adminJoined = true;
+      if (!announcement) {
+        try {
+          await matrix(`/_matrix/client/v3/rooms/${encodeURIComponent(created.room_id)}/leave`, session.token, "POST", {});
+          adminJoined = false;
+        } catch (error) {
+          console.error("Could not leave the created channel", error);
+        }
+        if (!adminJoined) {
+          await matrix(`/_matrix/client/v3/rooms/${encodeURIComponent(created.room_id)}/forget`, session.token, "POST", {})
+            .catch((error) => console.error("Left the created channel but could not forget it", error));
+        }
+      }
+      return reply(response, 201, { roomId: created.room_id, adminJoined });
     }
     if (request.method === "GET" && path === "/api/audit") {
       const contents = await readFile(auditPath, "utf8").catch((error) => {
         if (error.code === "ENOENT") return "";
         throw error;
       });
-      const entries = contents.trim().split("\n").filter(Boolean).slice(-200).reverse().map((line) => JSON.parse(line));
+      const entries = contents.trim().split("\n").filter(Boolean).slice(-200).reverse().flatMap((line) => {
+        try { return [JSON.parse(line)]; } catch { return []; }
+      });
       return reply(response, 200, { entries });
     }
     if (request.method === "POST" && path === "/api/revoke-device") {

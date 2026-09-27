@@ -14,7 +14,7 @@ public class MainActivity extends BridgeActivity {
             screenCaptureCallback = () -> {
                 if (bridge != null && bridge.getWebView() != null) {
                     bridge.getWebView().post(() -> bridge.getWebView().evaluateJavascript(
-                        "window.dispatchEvent(new Event('sales-messenger-screenshot'))", null));
+                        "window.dispatchEvent(new Event('anomychat-screenshot'))", null));
                 }
             };
             registerScreenCaptureCallback(getMainExecutor(), screenCaptureCallback);

@@ -1,4 +1,6 @@
-const preferenceKey = "sales-messenger-call-ringtone-v1";
+import { storageKey } from "./events";
+
+const preferenceKey = storageKey("call-ringtone-v1");
 let audio: AudioContext | null = null;
 let timer: number | null = null;
 const activeGains = new Set<GainNode>();

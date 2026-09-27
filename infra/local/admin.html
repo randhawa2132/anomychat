@@ -57,9 +57,9 @@
             <label>App name <input name="name" maxlength="40" required /></label>
             <fieldset class="palette-field"><legend>Color palette</legend>
               <div class="palette-preview" aria-label="Default palette: black, white, and warm clay">
-                <span class="palette-chip" style="--chip:#171514"><i></i> Black <small>#171514</small></span>
-                <span class="palette-chip" style="--chip:#ffffff"><i></i> White <small>#ffffff</small></span>
-                <span class="palette-chip" style="--chip:#d39e80"><i></i> Warm clay <small>#d39e80</small></span>
+                <span class="palette-chip chip-ink"><i></i> Black <small>#171514</small></span>
+                <span class="palette-chip chip-paper"><i></i> White <small>#ffffff</small></span>
+                <span class="palette-chip chip-clay"><i></i> Warm clay <small>#d39e80</small></span>
               </div>
               <label>Accent color <input name="accent" type="color" value="#d39e80" required /></label>
               <button class="secondary" id="reset-palette" type="button">Use warm clay</button>
@@ -83,12 +83,12 @@
 
         <section class="card" aria-labelledby="rooms-title">
           <h2 id="rooms-title">Rooms <span id="room-count"></span></h2>
-          <p class="hint">Room metadata is visible to server admins. End-to-end encrypted message contents are not.</p>
+          <p class="hint">Room metadata is visible to server admins. Encrypted message contents are not, with one exception: this account stays in the announcement rooms it creates in order to post, and a joined member receives that room's message keys. Province channels are handed to their members and this account leaves them.</p>
           <form id="channel-form" class="inline-form">
             <label>Channel name <input name="name" maxlength="120" required placeholder="Alberta Sales" /></label>
             <label>Type <select name="kind"><option value="province">Province channel</option><option value="announcements">Company announcements</option></select></label>
             <label id="province-field">Province or territory <select name="province"><option>Alberta</option><option>British Columbia</option><option>Manitoba</option><option>New Brunswick</option><option>Newfoundland and Labrador</option><option>Northwest Territories</option><option>Nova Scotia</option><option>Nunavut</option><option>Ontario</option><option>Prince Edward Island</option><option>Quebec</option><option>Saskatchewan</option><option>Yukon</option></select></label>
-            <label>Invite Matrix IDs (comma separated) <input name="invite" placeholder="@alice:chat.example.com, @bob:chat.example.com" /></label>
+            <label>Invite Matrix IDs (comma separated; for a province channel the first becomes its moderator) <input name="invite" required placeholder="@alice:chat.example.com, @bob:chat.example.com" /></label>
             <button type="submit">Create encrypted channel</button>
           </form>
           <label>Find room <input id="room-search" type="search" placeholder="Name or room ID" /></label>

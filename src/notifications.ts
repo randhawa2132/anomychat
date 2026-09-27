@@ -1,7 +1,10 @@
 import type { MatrixClient } from "matrix-js-sdk";
+import { storageKey } from "./events";
 
-const appId = "com.sales_messenger.web";
-const keyName = (userId: string) => `sales-messenger-web-push-v1:${userId}`;
+const appId = "org.anomychat.web";
+// Pushers registered before the rename are still removable.
+const legacyAppId = "com.sales_messenger.web";
+const keyName = (userId: string) => `${storageKey("web-push-v1")}:${userId}`;
 
 async function pushJson<T>(response: Response, step: string): Promise<T> {
   if (!response.headers.get("content-type")?.includes("application/json")) {
@@ -75,6 +78,7 @@ export async function disableWebPush(client: MatrixClient, userId: string): Prom
   const accessToken = client.getAccessToken();
   let failure: unknown;
   try { await client.removePusher(pushKey, appId); } catch (error) { failure = error; }
+  try { await client.removePusher(pushKey, legacyAppId); } catch { /* No pre-rename pusher to remove. */ }
   try {
     const response = await fetch(`/_push/v1/subscriptions/${encodeURIComponent(pushKey)}`, { method: "DELETE", headers: { Authorization: `Bearer ${accessToken}` } });
     if (!response.ok && response.status !== 404) throw new Error("Could not remove gateway subscription");

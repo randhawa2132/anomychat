@@ -157,3 +157,13 @@ button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visi
   .call-dialog .call-control-label{white-space:nowrap}.call-dialog .answer-button{order:-1;flex-basis:100%;max-width:230px;margin:0 auto 12px}
   .call-dialog .call-control:hover,.call-dialog .hangup-button:hover{background:none}
 }
+
+.trust-warning{margin:14px clamp(15px,5vw,70px) 0;max-width:none;text-align:left;display:grid;gap:6px;padding:14px 16px;font-size:13px}
+.trust-warning strong{font-size:13px}.trust-warning .text-button{justify-self:start;padding:0;color:inherit;text-decoration:underline}
+.trust-verified{color:#2c705b}.trust-unverified{color:#a33f3f}
+.member-row small{display:block;color:inherit;font-size:11px}
+.sas-codes{display:flex;flex-wrap:wrap;gap:10px;margin:16px 0}
+.sas-code{display:grid;justify-items:center;gap:3px;min-width:74px;padding:10px 6px;border:1px solid var(--border);border-radius:12px;background:var(--surface-soft);font-size:11px;color:var(--muted);text-align:center}
+.sas-glyph{font-size:27px;line-height:1}
+.sas-decimal{display:block;font-size:26px;letter-spacing:.06em;user-select:all}
+.sas-actions{display:flex;flex-wrap:wrap;gap:10px}

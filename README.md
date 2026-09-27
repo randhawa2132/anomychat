@@ -6,7 +6,7 @@ An open-source, self-hosted Matrix communication app for a small organization. T
 
 ## What is included
 
-- Web messenger: encrypted direct and group rooms, files and voice notes, room invitations, recovery keys, presence, call UI, and browser push notifications.
+- Web messenger: encrypted direct and group rooms, files and voice notes, room invitations, recovery keys, emoji (SAS) device verification with unverified-device warnings, presence, call UI, and browser push notifications.
 - Encrypted files up to 100 MB use chunked client-side encryption and streamed integrity checks. Voice notes remain limited to 20 MB and 60 seconds.
 - Android Capacitor app: the web client in a native shell. Enter your server URL at sign-in. The generic APK does not contain an organization's accounts or server keys.
 - iOS source project: requires a Mac and Xcode to build; no iOS binary is provided.
@@ -37,11 +37,12 @@ The local web client opens at `http://127.0.0.1:5173/`. Follow [local developmen
 
 ## Encryption at a glance
 
-Messages in encrypted rooms use Matrix client-side encryption. Files and voice notes are encrypted in the browser before upload. Calls use WebRTC media encryption. The homeserver still sees account IDs, room membership, timing, sizes, IP addresses, and other metadata. A stolen device, compromised browser, weak account password, leaked recovery key, or malicious room member can reveal content. See [how encryption works and what can go wrong](docs/SECURITY.md) for precise limits.
+Messages in encrypted rooms use Matrix client-side encryption. Files and voice notes are encrypted in the browser before upload. Calls use WebRTC media encryption. Devices can be verified by comparing emoji, and rooms containing unverified devices are flagged. The homeserver still sees account IDs, room membership, timing, sizes, IP addresses, and other metadata. A stolen device, compromised browser, weak account password, leaked recovery key, or malicious room member can reveal content. See [how encryption works and what can go wrong](docs/SECURITY.md) for precise limits.
 
 ## Important current limits
 
 - Native Android/iOS background push is not integrated; browser Web Push requires opt-in and a supported installed browser app. Messages are generic and contain no plaintext.
+- Device verification is available but not enforced: messages are still sent to unverified devices, and the app warns instead of blocking.
 - Reliable cross-network calls require a separately configured TURN service. This repository does not provision one.
 - The administrator portal uses Matrix password sign-in without a second factor. Protect administrator accounts and limit exposure according to your risk level.
 - Disappearing messages, view-once media, and screenshot notices are client behaviors, not guarantees against copying or other Matrix clients.

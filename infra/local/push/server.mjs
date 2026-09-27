@@ -14,8 +14,27 @@ async function readJson(path, fallback) {
   try { return JSON.parse(await readFile(path, "utf8")); }
   catch (error) { if (error.code === "ENOENT") return fallback; throw error; }
 }
-const vapid = await readJson(vapidPath, null) || webpush.generateVAPIDKeys();
-if (!(await readJson(vapidPath, null))) await writeFile(vapidPath, JSON.stringify(vapid), { flag: "wx", mode: 0o600 });
+async function loadVapidKeys() {
+  const existing = await readJson(vapidPath, null);
+  if (existing?.publicKey && existing.privateKey) return existing;
+  const generated = webpush.generateVAPIDKeys();
+  try {
+    await writeFile(vapidPath, JSON.stringify(generated), { flag: "wx", mode: 0o600 });
+    return generated;
+  } catch (error) {
+    // Another instance won the race: use the keys it stored. Anything else means
+    // the keys cannot be persisted, and silently rotating them would break every
+    // existing browser subscription.
+    if (error.code !== "EEXIST") throw new Error(`Cannot persist VAPID keys at ${vapidPath}: ${error.message}`);
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const stored = await readJson(vapidPath, null).catch(() => null);
+      if (stored?.publicKey && stored.privateKey) return stored;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error(`VAPID key file at ${vapidPath} is still empty or invalid`);
+  }
+}
+const vapid = await loadVapidKeys();
 webpush.setVapidDetails(process.env.VAPID_SUBJECT || "mailto:push@example.com", vapid.publicKey, vapid.privateKey);
 const subscriptions = await readJson(statePath, {});
 let saving = Promise.resolve();
@@ -32,12 +51,14 @@ function json(response, status, value) {
   response.end(JSON.stringify(value));
 }
 async function body(request) {
-  let raw = "";
+  const chunks = [];
+  let size = 0;
   for await (const chunk of request) {
-    raw += chunk;
-    if (raw.length > 65536) throw new Error("Request too large");
+    size += chunk.length;
+    if (size > 65536) throw new Error("Request too large");
+    chunks.push(chunk);
   }
-  return JSON.parse(raw || "{}");
+  return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 }
 async function userId(request) {
   const token = request.headers.authorization?.match(/^Bearer (\S+)$/)?.[1];
@@ -60,6 +81,8 @@ function equalSecret(a, b) {
   const right = Buffer.from(b);
   return left.length === right.length && timingSafeEqual(left, right);
 }
+// The second entry is the pre-rename app id, still present on older pushers.
+const appIds = ["org.anomychat.web", "com.sales_messenger.web"];
 const recentEvents = new Map();
 const recentTests = new Map();
 const server = createServer(async (request, response) => {
@@ -101,6 +124,7 @@ const server = createServer(async (request, response) => {
       if (!item || item.owner !== owner) return json(response, 404, { error: "Enable background push on this browser first" });
       if (Date.now() - (recentTests.get(pushKey) || 0) < 30000) return json(response, 429, { error: "Wait 30 seconds before another test" });
       recentTests.set(pushKey, Date.now());
+      for (const key of recentTests.keys()) if (!subscriptions[key]) recentTests.delete(key);
       try {
         await webpush.sendNotification(item.subscription, JSON.stringify({ title: "Test alert", body: "Background alerts are ready on this device.", url: "/" }), { TTL: 60, urgency: "normal" });
         return json(response, 200, { accepted: true });
@@ -116,7 +140,7 @@ const server = createServer(async (request, response) => {
       let transientFailure = false;
       for (const device of notification.devices) {
         const item = subscriptions[device.pushkey];
-        if (device.app_id !== "com.sales_messenger.web" || !item || !equalSecret(device.data?.gateway_token, item.token)) { rejected.push(device.pushkey); continue; }
+        if (!appIds.includes(device.app_id) || !item || !equalSecret(device.data?.gateway_token, item.token)) { rejected.push(device.pushkey); continue; }
         if (!notification.event_id) continue;
         const duplicateKey = `${device.pushkey}:${notification.event_id}`;
         if (recentEvents.has(duplicateKey)) continue;

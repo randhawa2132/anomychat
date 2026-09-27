@@ -27,12 +27,12 @@ stopped=true
 
 docker compose --env-file .env -f compose.yaml exec -T postgres \
   pg_dump -U synapse -d synapse --format=custom \
-  | restic backup --stdin --stdin-filename synapse-postgres.dump --tag "sales-messenger-$stamp"
+  | restic backup --stdin --stdin-filename synapse-postgres.dump --tag "anomychat-$stamp"
 
 restic backup .env data/synapse data/push data/admin compose.yaml Caddyfile web \
-  --tag "sales-messenger-$stamp"
+  --tag "anomychat-$stamp"
 restic check
 
 restart_synapse
 stopped=false
-echo "Encrypted backup pair completed with tag sales-messenger-$stamp. Restore rehearsal is still required."
+echo "Encrypted backup pair completed with tag anomychat-$stamp. Restore rehearsal is still required."

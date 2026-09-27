@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
-    "test:media": "node --experimental-strip-types --test tests/media.test.mjs",
+    "test": "node --experimental-strip-types --test \"tests/*.test.mjs\"",
     "preview": "vite preview --host 127.0.0.1",
     "admin:local": "node infra/local/admin-server.mjs",
     "mobile:sync": "npm run build && node scripts/sync-native-branding.mjs && cap sync"
