@@ -12,7 +12,7 @@ const homeserver = process.env.ADMIN_HOMESERVER_URL || "http://127.0.0.1:8008";
 const publicDir = process.env.ADMIN_PUBLIC_DIR || join(projectRoot, "public");
 const distDir = process.env.ADMIN_PUBLIC_DIR || join(projectRoot, "dist");
 const serverMode = process.env.ADMIN_SERVER_MODE === "1";
-const port = 5174;
+const port = Number(process.env.ADMIN_PORT || 5174);
 const sessionLifetimeMs = 30 * 60 * 1000;
 const sessions = new Map();
 const execFileAsync = promisify(execFile);
@@ -123,7 +123,7 @@ function cookie(request) {
   return entry?.slice("anomychat_admin=".length) || null;
 }
 
-function currentSession(request) {
+async function currentSession(request) {
   const id = cookie(request);
   const session = id && sessions.get(id);
   if (!session) throw new RequestError(401, "Sign in as a server administrator.");
@@ -131,6 +131,13 @@ function currentSession(request) {
     sessions.delete(id);
     void matrix("/_matrix/client/v3/logout", session.token, "POST", {}).catch(() => {});
     throw new RequestError(401, "Admin session expired. Sign in again.");
+  }
+  // Synapse authorization can change while this cookie is still valid. Recheck
+  // before local-only actions such as branding and audit reads.
+  const account = await matrix(`/_synapse/admin/v2/users/${encodeURIComponent(session.userId)}`, session.token);
+  if (!account.admin || account.suspended || account.deactivated) {
+    sessions.delete(id);
+    throw new RequestError(403, "Administrator access has been revoked.");
   }
   session.lastUsed = Date.now();
   return session;
@@ -242,7 +249,7 @@ const server = createServer(async (request, response) => {
       return reply(response, 200, { ok: true }, { "Set-Cookie": `anomychat_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${request.headers.host === publicHost ? "; Secure" : ""}` });
     }
 
-    const session = currentSession(request);
+    const session = await currentSession(request);
     if (request.method === "GET" && path === "/api/me") return reply(response, 200, { userId: session.userId });
     if (request.method === "GET" && path === "/api/branding") {
       return reply(response, 200, JSON.parse(await readFile(join(publicDir, "branding.json"), "utf8")));

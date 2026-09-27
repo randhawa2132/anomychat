@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import webpush from "web-push";
+import { trimSubscriptions } from "./subscriptions.mjs";
 
 const dataDir = process.env.PUSH_DATA_DIR || "/data";
 const statePath = `${dataDir}/subscriptions.json`;
@@ -104,7 +105,9 @@ const server = createServer(async (request, response) => {
         for (const [key, item] of Object.entries(subscriptions)) if (item.subscription.endpoint === subscription.endpoint && item.owner !== owner) delete subscriptions[key];
         const pushKey = existing?.[0] || randomBytes(32).toString("base64url");
         const token = existing?.[1].token || randomBytes(32).toString("base64url");
+        if (existing) delete subscriptions[pushKey];
         subscriptions[pushKey] = { owner, token, subscription };
+        trimSubscriptions(subscriptions, owner);
         await save();
         return json(response, 200, { pushKey, token, gatewayUrl });
       }
