@@ -78,6 +78,8 @@ services:
       ADMIN_LISTEN_HOST: 0.0.0.0
       ADMIN_SERVER_MODE: "1"
       ADMIN_PUBLIC_HOST: admin.${PUBLIC_HOST:?Run setup.sh first}
+      ADMIN_REQUEST_HOST: ${PUBLIC_HOST:?Run setup.sh first}
+      ADMIN_MATRIX_SERVER_NAME: ${PUBLIC_HOST:?Run setup.sh first}
     ports:
       - "127.0.0.1:5174:5174"
     volumes:

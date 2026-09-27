@@ -26,6 +26,8 @@ The homeserver needs to route events and manage accounts. It can see user IDs, d
 
 Matrix recovery keys back up encrypted message keys. A strong generated key should be saved outside the app. Anyone with the recovery key and sufficient account access may recover history. Losing all device keys and the recovery key can make old messages permanently unreadable. Password sign-in alone does not recover encrypted history.
 
+Signed-in members can change their password using Matrix user-interactive authentication with the current password; other devices are signed out. A signed-out member can submit a password help request from the login screen. The public endpoint always gives the same response for known and unknown usernames, limits submissions by address, and stores only a username, time, status, and random request ID. An administrator must verify identity through a trusted channel, then set a temporary password in the admin panel. Synapse signs out all devices on reset. The password is sent to Synapse and is not kept in the request file or action log. The admin must deliver it privately. **Neither password flow restores message keys**; the member needs their separate Matrix recovery key or another trusted device to recover encrypted history.
+
 The web client stores its Matrix access token in browser local storage and crypto material in IndexedDB. A person who controls the unlocked device, browser profile, malicious extension, or injected same-origin script may read content or act as the account. The Android app is a Capacitor WebView; native secret isolation has not been independently reviewed. Android OS backup is disabled for the app.
 
 ## Calls and limitations

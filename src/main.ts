@@ -13,6 +13,7 @@ import { Capacitor } from "@capacitor/core";
 import { bothKeys, flag, key as customKey, localName, migrateStorage, storageKey } from "./events";
 import { decryptMedia, encryptMedia, sameOriginMediaUrl, type EncryptedMedia } from "./media";
 import { disableWebPush, enableWebPush, sendWebPushTest, webPushAvailable, webPushEnabled } from "./notifications";
+import { changeMatrixPassword } from "./password";
 import { primeRingtone, ringtoneEnabled, setRingtoneEnabled, startRingtone, stopRingtone } from "./ringtone";
 import "./style.css";
 
@@ -672,6 +673,26 @@ function renderLogin(): void {
   const button = element("button", "primary", "Sign in");
   button.type = "submit";
   form.append(serverLabel, userLabel, passLabel, button);
+  const forgot = element("button", "text-button", "Forgot password? Request help");
+  forgot.type = "button";
+  forgot.addEventListener("click", async () => {
+    if (!userInput.value.trim()) { setStatus("Enter your username first."); userInput.focus(); return; }
+    forgot.disabled = true;
+    try {
+      const server = new URL(serverInput.value.trim());
+      const local = ["localhost", "127.0.0.1"].includes(server.hostname);
+      if (server.protocol !== "https:" && !(server.protocol === "http:" && local && !Capacitor.isNativePlatform())) throw new Error("Use an HTTPS Matrix server.");
+      const helpBase = local && server.port === "8008" && location.port === "5173" ? location.origin : server.origin;
+      const response = await fetch(new URL("/_account/password-requests", helpBase), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: userInput.value.trim().toLowerCase() }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Request could not be sent.");
+      setStatus(data.message || "If this is your account, contact an administrator through a trusted channel.");
+    } catch (error) { setStatus(`Could not request help: ${errorMessage(error)}`); }
+    finally { forgot.disabled = false; }
+  });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     button.disabled = true;
@@ -705,7 +726,7 @@ function renderLogin(): void {
       button.disabled = false;
     }
   });
-  card.append(form, element("p", "status", statusText));
+  card.append(form, forgot, element("p", "status", statusText));
   card.lastElementChild!.id = "status";
   page.append(card);
   root!.append(page);
@@ -2068,6 +2089,38 @@ function renderApp(): void {
     profile.append(profileInput, chooseProfile, saveProfile, element("p", "", canSaveProfile
       ? "The photo is encrypted and shared with members of your current rooms."
       : "Create or join an encrypted room before saving a profile picture."), devices, logout);
+    const passwordCard = element("section", "settings-card");
+    passwordCard.append(element("h2", "", "Change password"), element("p", "", "Your current password is required. Other devices will be signed out. Save your Matrix recovery key first so you can restore encrypted history when signing back in."));
+    const passwordForm = element("form", "display-name-form");
+    const passwordFields: HTMLInputElement[] = [];
+    for (const [label, autocomplete] of [["Current password", "current-password"], ["New password", "new-password"], ["Confirm new password", "new-password"]] as const) {
+      const fieldLabel = element("label", "field-label", label);
+      const input = element("input") as HTMLInputElement;
+      input.type = "password";
+      input.autocomplete = autocomplete;
+      input.required = true;
+      if (passwordFields.length > 0) input.minLength = 12;
+      fieldLabel.append(input);
+      passwordForm.append(fieldLabel);
+      passwordFields.push(input);
+    }
+    const savePassword = element("button", "primary", "Change password");
+    savePassword.type = "submit";
+    const passwordFeedback = element("p", "setting-feedback", "Changing the password does not replace your Matrix recovery key.");
+    passwordForm.append(savePassword, passwordFeedback);
+    passwordForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const [oldInput, newInput, confirmInput] = passwordFields;
+      if (newInput.value !== confirmInput.value) { passwordFeedback.textContent = "New passwords do not match."; return; }
+      if (newInput.value.length < 12 || newInput.value.length > 256) { passwordFeedback.textContent = "Use a password of 12–256 characters."; return; }
+      savePassword.disabled = true;
+      try {
+        await changeMatrixPassword(currentSession!.baseUrl, currentSession!.accessToken, currentSession!.userId, oldInput.value, newInput.value);
+        passwordFeedback.textContent = "Password changed. Other devices were signed out; use your Matrix recovery key to restore history there.";
+      } catch (error) { passwordFeedback.textContent = `Could not change password: ${errorMessage(error)}`; }
+      finally { for (const input of passwordFields) input.value = ""; savePassword.disabled = false; }
+    });
+    passwordCard.append(passwordForm);
     const appearance = element("section", "settings-card");
     appearance.append(element("h2", "", "Appearance"), element("p", "", "Choose how the app looks on this device."));
     const themeSelect = element("select", "theme-select");
@@ -2106,7 +2159,7 @@ function renderApp(): void {
     const aboutName = element("h2", "", brandName);
     aboutName.dataset.brandName = "";
     about.append(aboutName, element("p", "", "App name and accent color are set in the local admin panel."));
-    panel.append(profile, appearance, notificationSettings, privacy, about);
+    panel.append(profile, passwordCard, appearance, notificationSettings, privacy, about);
     content.append(panel);
   } else if (activeSection === "notifications") {
     const panel = element("div", "section-panel");

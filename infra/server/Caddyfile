@@ -17,6 +17,10 @@
         reverse_proxy push:3000
     }
 
+    handle /_account/password-requests {
+        reverse_proxy admin:5174
+    }
+
     handle /_matrix/* {
         reverse_proxy synapse:8008
     }

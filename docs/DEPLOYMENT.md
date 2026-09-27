@@ -43,6 +43,8 @@ docker compose exec synapse register_new_matrix_user -c /data/homeserver.yaml ht
 
 Choose a unique username, a long unique password, and answer **yes** to administrator for this one account. Registration is closed to the public. Sign in at the admin URL, create normal member accounts there, and deliver temporary passwords through a private channel. Members should change their passwords, set up a Matrix recovery key, and verify devices. Do not reuse the administrator account for daily chat.
 
+The web and Android login screens send password help requests to `/_account/password-requests` on the selected server. Deploy the included Caddy and admin service configuration together to enable that route. Admins see pending requests in the dashboard, verify identity through a trusted channel, and set a temporary password. The reset signs out the member's devices. Passwords are not saved in the admin request queue; keep the request queue in the backed-up `infra/server/data/admin/` directory. Members need their separate Matrix recovery key to restore encrypted history after signing back in.
+
 ## 4. Customize your installation
 
 In the admin portal, set the web app name, accent color, and PNG icon. These values belong to this installation. The generic Android APK remains named AnomyChat and can connect to your server without rebuilding. If you want your own Android launcher name, package ID, and icon, fork the source and make your own signed release; changing the server's web branding does not change installed APKs.

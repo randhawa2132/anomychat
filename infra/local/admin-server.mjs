@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { execFile } from "node:child_process";
@@ -21,7 +21,30 @@ const publicHost = process.env.ADMIN_PUBLIC_HOST;
 if (publicHost) allowedHosts.add(publicHost);
 const provinces = new Set(["Alberta", "British Columbia", "Manitoba", "New Brunswick", "Newfoundland and Labrador", "Northwest Territories", "Nova Scotia", "Nunavut", "Ontario", "Prince Edward Island", "Quebec", "Saskatchewan", "Yukon"]);
 const auditPath = process.env.ADMIN_AUDIT_PATH || join(directory, "data", "admin-audit.jsonl");
+const requestsPath = process.env.ADMIN_PASSWORD_REQUESTS_PATH || join(dirname(auditPath), "password-requests.json");
+const requestHost = process.env.ADMIN_REQUEST_HOST || publicHost?.replace(/^admin\./, "");
+if (requestHost) allowedHosts.add(requestHost);
+allowedHosts.add("127.0.0.1:5173");
+allowedHosts.add("localhost:5173");
 await mkdir(dirname(auditPath), { recursive: true }).catch((error) => console.error("Could not create the admin audit directory", error));
+let passwordRequests = await readFile(requestsPath, "utf8").then(JSON.parse).catch((error) => {
+  if (error.code === "ENOENT") return [];
+  throw error;
+});
+if (!Array.isArray(passwordRequests)) throw new Error("Invalid password request file.");
+let requestWrite = Promise.resolve();
+function savePasswordRequests() {
+  // Serialize writes so a request and an admin decision cannot overwrite each other.
+  requestWrite = requestWrite.catch(() => {}).then(async () => {
+    const tmp = `${requestsPath}.${process.pid}.tmp`;
+    await writeFile(tmp, JSON.stringify(passwordRequests.slice(-1000)), { mode: 0o600 });
+    await rename(tmp, requestsPath);
+  });
+  return requestWrite;
+}
+const requestAttempts = new Map();
+const resetInProgress = new Set();
+const passwordRequestResponse = { ok: true, message: "If this is your account, an administrator can review your request. Contact them through a trusted channel to verify your identity." };
 const loginFailures = new Map();
 const loginFailureLimit = 5;
 const loginFailureWindowMs = 15 * 60 * 1000;
@@ -37,7 +60,7 @@ async function audit(actor, action, target) {
 
 /** Client address, taken from the proxy only when this panel runs behind one. */
 function clientAddress(request) {
-  if (publicHost && request.headers.host === publicHost) {
+  if (publicHost && [publicHost, requestHost].includes(request.headers.host)) {
     const forwarded = request.headers["x-forwarded-for"];
     // Caddy appends the immediate peer, so the last entry is the trustworthy one.
     const last = forwarded?.split(",").pop()?.trim();
@@ -143,8 +166,10 @@ async function currentSession(request) {
   return session;
 }
 
-function sameOrigin(request) {
+function sameOrigin(request, path) {
   if (!(["POST", "PUT", "PATCH", "DELETE"].includes(request.method))) return;
+  // This endpoint has no session cookie or secrets; native apps may call it cross-origin.
+  if (path === "/_account/password-requests") return;
   const origin = request.headers.origin;
   const expected = request.headers.host === publicHost ? `https://${publicHost}` : `http://${request.headers.host}`;
   if (origin !== expected) throw new RequestError(403, "Request origin is not allowed.");
@@ -187,8 +212,31 @@ async function serveFile(response, filename, type) {
 const server = createServer(async (request, response) => {
   try {
     if (!allowedHosts.has(request.headers.host)) throw new RequestError(403, "Host is not allowed.");
-    sameOrigin(request);
     const path = new URL(request.url, `http://${request.headers.host}`).pathname;
+    sameOrigin(request, path);
+    if (path === "/_account/password-requests" && request.method === "OPTIONS") {
+      response.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "content-type" });
+      return response.end();
+    }
+    if (path === "/_account/password-requests" && request.method === "POST") {
+      const body = await requestBody(request);
+      if (typeof body.username !== "string" || !/^[a-z0-9._=-]{1,64}$/.test(body.username)) throw new RequestError(400, "Enter a valid username.");
+      const address = clientAddress(request);
+      const now = Date.now();
+      const attempts = (requestAttempts.get(address) || []).filter((time) => now - time < 15 * 60 * 1000);
+      attempts.push(now);
+      requestAttempts.set(address, attempts);
+      if (requestAttempts.size > 10000) requestAttempts.delete(requestAttempts.keys().next().value);
+      const serverName = process.env.ADMIN_MATRIX_SERVER_NAME || (request.headers.host === requestHost ? requestHost : "localhost");
+      const userId = `@${body.username}:${serverName}`;
+      const alreadyPending = passwordRequests.some((item) => item.userId === userId && item.state === "pending");
+      if (attempts.length <= 5 && !alreadyPending) {
+        passwordRequests.push({ id: randomBytes(16).toString("hex"), userId, at: new Date(now).toISOString(), state: "pending" });
+        passwordRequests = passwordRequests.slice(-1000);
+        await savePasswordRequests();
+      }
+      return reply(response, 200, passwordRequestResponse, { "Access-Control-Allow-Origin": "*" });
+    }
     if (request.method === "GET" && path === "/") return await serveFile(response, "admin.html", "text/html; charset=utf-8");
     if (request.method === "GET" && path === "/admin.js") return await serveFile(response, "admin.js", "text/javascript; charset=utf-8");
     if (request.method === "GET" && path === "/admin.css") return await serveFile(response, "admin.css", "text/css; charset=utf-8");
@@ -251,6 +299,39 @@ const server = createServer(async (request, response) => {
 
     const session = await currentSession(request);
     if (request.method === "GET" && path === "/api/me") return reply(response, 200, { userId: session.userId });
+    if (request.method === "GET" && path === "/api/password-requests") {
+      return reply(response, 200, { requests: passwordRequests.filter((item) => item.state === "pending").reverse() });
+    }
+    if (request.method === "POST" && path === "/api/password-requests/dismiss") {
+      const body = await requestBody(request);
+      const item = passwordRequests.find((entry) => entry.id === body.id && entry.state === "pending");
+      if (!item) throw new RequestError(404, "Request was not found.");
+      item.state = "dismissed";
+      await savePasswordRequests();
+      await audit(session.userId, "dismiss-password-request", item.userId);
+      return reply(response, 200, { ok: true });
+    }
+    if (request.method === "POST" && path === "/api/password-requests/reset") {
+      const body = await requestBody(request);
+      if (typeof body.password !== "string" || body.password.length < 12 || body.password.length > 256) {
+        throw new RequestError(400, "Use a temporary password of 12–256 characters.");
+      }
+      const item = passwordRequests.find((entry) => entry.id === body.id && entry.state === "pending");
+      if (!item) throw new RequestError(404, "Request was not found.");
+      const serverName = session.userId.split(":").slice(1).join(":");
+      if (!item.userId.endsWith(`:${serverName}`) || item.userId === session.userId) throw new RequestError(403, "Choose a local member account.");
+      if (resetInProgress.has(item.id)) throw new RequestError(409, "This request is already being handled.");
+      resetInProgress.add(item.id);
+      try {
+        const account = await matrix(`/_synapse/admin/v2/users/${encodeURIComponent(item.userId)}`, session.token);
+        if (account.admin || account.deactivated) throw new RequestError(403, "Only active member accounts can be reset here.");
+        await matrix(`/_synapse/admin/v1/reset_password/${encodeURIComponent(item.userId)}`, session.token, "POST", { new_password: body.password, logout_devices: true });
+        item.state = "completed";
+        await savePasswordRequests();
+        await audit(session.userId, "reset-password", item.userId);
+        return reply(response, 200, { ok: true, userId: item.userId });
+      } finally { resetInProgress.delete(item.id); }
+    }
     if (request.method === "GET" && path === "/api/branding") {
       return reply(response, 200, JSON.parse(await readFile(join(publicDir, "branding.json"), "utf8")));
     }

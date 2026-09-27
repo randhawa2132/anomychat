@@ -75,6 +75,65 @@ function renderAudit(entries) {
   }
 }
 
+function renderPasswordRequests(requests) {
+  const body = $("password-requests");
+  body.replaceChildren();
+  $("password-request-count").textContent = `(${requests.length})`;
+  for (const request of requests) {
+    const row = document.createElement("tr");
+    cell(row, timeLabel(Date.parse(request.at)));
+    cell(row, request.userId);
+    const actions = document.createElement("td");
+    const reset = document.createElement("button");
+    reset.type = "button";
+    reset.textContent = "Set temporary password";
+    reset.addEventListener("click", () => {
+      const submit = document.createElement("button");
+      submit.type = "button";
+      submit.textContent = "Reset password and sign out devices";
+      showDetails(`Reset ${request.userId}`, ["Verify this person's identity through a trusted channel first. Record the temporary password before clicking Reset, then give it privately to the person. Their Matrix recovery key remains separate."], [submit]);
+      const label = document.createElement("label");
+      label.textContent = "Temporary password (12–256 characters)";
+      const input = document.createElement("input");
+      input.type = "password";
+      input.autocomplete = "new-password";
+      input.minLength = 12;
+      input.maxLength = 256;
+      label.append(input);
+      $("details-body").append(label);
+      input.focus();
+      submit.addEventListener("click", async () => {
+        if (input.value.length < 12 || input.value.length > 256) { notice("Use a password of 12–256 characters.", true); return; }
+        submit.disabled = true;
+        try {
+          await api("/api/password-requests/reset", "POST", { id: request.id, password: input.value });
+          input.value = "";
+          $("details-dialog").close();
+          notice(`Reset ${request.userId}. Give the temporary password privately. Their Matrix recovery key remains separate.`);
+          await refresh();
+        } catch (error) { notice(error.message, true); submit.disabled = false; }
+      });
+    });
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "secondary";
+    dismiss.textContent = "Dismiss";
+    dismiss.addEventListener("click", async () => {
+      dismiss.disabled = true;
+      try { await api("/api/password-requests/dismiss", "POST", { id: request.id }); await refresh(); }
+      catch (error) { notice(error.message, true); dismiss.disabled = false; }
+    });
+    actions.append(reset, dismiss);
+    row.append(actions);
+    body.append(row);
+  }
+  if (!requests.length) {
+    const row = document.createElement("tr");
+    cell(row, "No pending requests.").colSpan = 3;
+    body.append(row);
+  }
+}
+
 function renderUsers() {
   const search = $("user-search").value.trim().toLowerCase();
   const body = $("users");
@@ -181,8 +240,8 @@ function renderRooms() {
 }
 
 async function refresh() {
-  const [health, accounts, roomData, branding, audit] = await Promise.all([
-    api("/api/health"), api("/api/users"), api("/api/rooms"), api("/api/branding"), api("/api/audit"),
+  const [health, accounts, roomData, branding, audit, passwordRequests] = await Promise.all([
+    api("/api/health"), api("/api/users"), api("/api/rooms"), api("/api/branding"), api("/api/audit"), api("/api/password-requests"),
   ]);
   $("branding-form").elements.name.value = branding.name;
   $("branding-form").elements.accent.value = branding.accent;
@@ -207,6 +266,7 @@ async function refresh() {
   renderUsers();
   renderRooms();
   renderAudit(audit.entries);
+  renderPasswordRequests(passwordRequests.requests);
 }
 
 async function signedIn(userId) {
@@ -326,6 +386,7 @@ $("logout").addEventListener("click", async () => {
 $("user-search").addEventListener("input", renderUsers);
 $("room-search").addEventListener("input", renderRooms);
 $("details-close").addEventListener("click", () => $("details-dialog").close());
+$("details-dialog").addEventListener("close", () => { for (const input of $("details-body").querySelectorAll('input[type="password"]')) input.value = ""; });
 
 api("/api/public-branding").then(applyBranding).catch(() => {});
 api("/api/me").then((result) => signedIn(result.userId)).catch(() => {});

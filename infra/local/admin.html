@@ -81,6 +81,12 @@
           <div class="table-wrap"><table><thead><tr><th>Account</th><th>Last active</th><th>Created</th><th>Role</th><th>Status</th><th>Action</th></tr></thead><tbody id="users"></tbody></table></div>
         </section>
 
+        <section class="card" aria-labelledby="password-requests-title">
+          <h2 id="password-requests-title">Password help requests <span id="password-request-count"></span></h2>
+          <p class="hint">Verify the person's identity through a trusted channel before resetting a password. A reset signs out every device. The person needs their separate Matrix recovery key to restore encrypted history. Give the temporary password privately; it is not stored here.</p>
+          <div class="table-wrap"><table><thead><tr><th>Requested</th><th>Account</th><th>Action</th></tr></thead><tbody id="password-requests"></tbody></table></div>
+        </section>
+
         <section class="card" aria-labelledby="rooms-title">
           <h2 id="rooms-title">Rooms <span id="room-count"></span></h2>
           <p class="hint">Room metadata is visible to server admins. Encrypted message contents are not, with one exception: this account stays in the announcement rooms it creates in order to post, and a joined member receives that room's message keys. Province channels are handed to their members and this account leaves them.</p>
