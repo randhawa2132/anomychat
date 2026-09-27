@@ -56,7 +56,7 @@ export function migrateStorage(store: StringStore, viewedOnceLimit = 500): void 
     if (name.startsWith(legacyViewedPrefix)) {
       // `<prefix><userId>:<eventId>`, and a Matrix user ID itself contains a colon.
       const rest = name.slice(legacyViewedPrefix.length);
-      const split = rest.lastIndexOf(":");
+      const split = rest.indexOf(":$");
       const userId = split < 0 ? "" : rest.slice(0, split);
       const eventId = split < 0 ? "" : rest.slice(split + 1);
       if (userId && eventId) {

@@ -292,11 +292,13 @@ function releaseMedia(eventId: string): void {
   mediaNodes.delete(eventId);
 }
 
-/** True while something on the page still points at this attachment's object URL. */
+/** True while an attachment is playing, loading, or open in a dialog. */
 function mediaInUse(eventId: string): boolean {
   if (pinnedMedia.has(eventId)) return true;
   const node = mediaNodes.get(eventId);
-  return Boolean(node?.isConnected);
+  if (node?.isConnected && !node.paused) return true;
+  const url = mediaUrls.get(eventId)?.url;
+  return Boolean(url && [...document.images].some((image) => image.src === url && !image.complete));
 }
 
 function cacheMediaUrl(eventId: string, url: string, bytes: number): void {
@@ -691,7 +693,7 @@ function renderLogin(): void {
         userId: response.user_id,
         accessToken: response.access_token,
         deviceId: response.device_id,
-        cryptoStorePrefix: `anomychat:${encodeURIComponent(response.user_id)}:${encodeURIComponent(response.device_id)}`,
+        cryptoStorePrefix: `sales-messenger:${encodeURIComponent(response.user_id)}:${encodeURIComponent(response.device_id)}`,
       };
       const password = passInput.value;
       passInput.value = "";
@@ -997,9 +999,14 @@ async function ensureCrossSigning(target: MatrixClient, userId: string, options:
     // Bootstrapping with no way to reach the existing private keys would publish a
     // new identity and void every verification anyone has already done, so that
     // case asks for a verification or a recovery key instead.
-    if (!options.fromSecretStorage && await crypto.userHasCrossSigningKeys(userId, true)) {
-      setStatus("This account already has device signing. Verify this device from another of your devices, or restore your recovery key.");
-      return;
+    if (await crypto.userHasCrossSigningKeys(userId, true)) {
+      const storedKeys = options.fromSecretStorage && await Promise.all(
+        ["master", "self_signing", "user_signing"].map((name) => target.secretStorage.get(`m.cross_signing.${name}`)),
+      );
+      if (!storedKeys || storedKeys.some((key) => !key)) {
+        setStatus("This account already has device signing. Verify this device from another of your devices, or restore your recovery key.");
+        return;
+      }
     }
     await crypto.bootstrapCrossSigning(options.password === undefined ? {} : { authUploadDeviceSigningKeys: passwordAuth(userId, options.password) });
   } catch (error) {

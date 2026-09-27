@@ -33,6 +33,7 @@ test("pre-rename browser state migrates and view-once markers collapse into one 
     "sales-messenger-session-v1": "{}",
     "sales-messenger-viewed-v1:@a:h:$one": "1",
     "sales-messenger-viewed-v1:@a:h:$two": "1",
+    "sales-messenger-viewed-v1:@a:h:$event:server": "1",
     "sales-messenger-viewed-v1:@b:h:$three": "1",
     "unrelated-key": "keep",
   });
@@ -41,7 +42,7 @@ test("pre-rename browser state migrates and view-once markers collapse into one 
   assert.equal(store.getItem(storageKey("session-v1")), "{}");
   assert.equal(store.getItem("unrelated-key"), "keep");
   assert.equal(store.getItem("sales-messenger-theme-v1"), null);
-  assert.deepEqual(JSON.parse(store.getItem(`${storageKey("viewed-v1")}:@a:h`)), ["$one", "$two"]);
+  assert.deepEqual(JSON.parse(store.getItem(`${storageKey("viewed-v1")}:@a:h`)), ["$one", "$two", "$event:server"]);
   assert.deepEqual(JSON.parse(store.getItem(`${storageKey("viewed-v1")}:@b:h`)), ["$three"]);
   assert.equal(Object.keys(store.all()).some((name) => name.startsWith("sales-messenger-")), false);
 
