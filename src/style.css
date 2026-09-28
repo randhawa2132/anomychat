@@ -168,4 +168,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visi
 .sas-glyph{font-size:27px;line-height:1}
 .sas-decimal{display:block;font-size:26px;letter-spacing:.06em;user-select:all}
 .sas-actions{display:flex;flex-wrap:wrap;gap:10px}
-@media (prefers-reduced-motion:no-preference){button,.room-row,.settings-card{transition:background-color .16s ease,color .16s ease,border-color .16s ease,box-shadow .16s ease,transform .12s ease}.room-row:hover{transform:translateX(2px)}button:not(:disabled):active{transform:scale(.98)}}
+@media (prefers-reduced-motion:no-preference){button,.room-row,.settings-card,.nav-item,.notification-row,.call-history-row{transition:background-color .18s ease,color .18s ease,border-color .18s ease,box-shadow .18s ease,transform .16s cubic-bezier(.2,.75,.25,1)}.room-row:hover{transform:translateX(2px)}button:not(:disabled):active{transform:scale(.98)}.message-enter{animation:message-arrive .18s cubic-bezier(.2,.75,.25,1) both}dialog[open]{animation:dialog-arrive .16s cubic-bezier(.2,.75,.25,1) both}}
+@keyframes message-arrive{from{opacity:0;transform:translateY(7px) scale(.99)}to{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes dialog-arrive{from{opacity:0;transform:translateY(8px) scale(.99)}to{opacity:1;transform:translateY(0) scale(1)}}

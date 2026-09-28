@@ -70,10 +70,25 @@ let roomWallpapers: Record<string, RoomWallpaper> = {};
 let notificationsSeenAt = 0;
 let pushFeedbackText = "";
 let sdkRenderQueued = false;
+let sdkRenderPending = false;
+root.addEventListener("focusout", (event) => {
+  if ((event.target as Element).getAttribute("aria-label") !== "Message" || !sdkRenderPending) return;
+  requestAnimationFrame(() => {
+    if (!sdkRenderPending || activeSection === "settings" || document.activeElement?.getAttribute("aria-label") === "Message") return;
+    sdkRenderPending = false;
+    renderApp();
+  });
+}, true);
 function renderFromSync(): void {
   if (activeSection === "settings" || sdkRenderQueued) return;
+  if (document.activeElement?.getAttribute("aria-label") === "Message") { sdkRenderPending = true; return; }
   sdkRenderQueued = true;
-  requestAnimationFrame(() => { sdkRenderQueued = false; if (activeSection !== "settings") renderApp(); });
+  requestAnimationFrame(() => {
+    sdkRenderQueued = false;
+    if (activeSection === "settings") return;
+    if (document.activeElement?.getAttribute("aria-label") === "Message") sdkRenderPending = true;
+    else { sdkRenderPending = false; renderApp(); }
+  });
 }
 let displayNameDraft: string | null = null;
 let ownDisplayName: string | null = null;
@@ -1880,8 +1895,12 @@ function activityNotifications(): ActivityNotification[] {
 
 function renderApp(): void {
   if (!client || !currentSession) return;
+  sdkRenderPending = false;
   const previousTimeline = root!.querySelector<HTMLElement>(".timeline");
   const previousRoomId = previousTimeline?.dataset.roomId;
+  const previousMessages = Array.from(previousTimeline?.querySelectorAll<HTMLElement>(".message[data-event-id]") || []);
+  const previousMessageIds = new Set(previousMessages.map((item) => item.dataset.eventId));
+  const previousLatestMessageTs = Math.max(0, ...previousMessages.map((item) => Number(item.dataset.eventTs) || 0));
   const previousDistanceFromBottom = previousTimeline ? previousTimeline.scrollHeight - previousTimeline.scrollTop - previousTimeline.clientHeight : 0;
   const wasComposing = document.activeElement?.getAttribute("aria-label") === "Message";
   root!.replaceChildren();
@@ -2365,6 +2384,12 @@ function renderApp(): void {
         }
         const own = event.getSender() === currentSession.userId;
         const bubble = element("article", `message${own ? " own" : ""}`);
+        const eventId = event.getId();
+        if (eventId) {
+          bubble.dataset.eventId = eventId;
+          bubble.dataset.eventTs = String(event.getTs());
+          if (previousRoomId === room.roomId && !previousMessageIds.has(eventId) && event.getTs() > previousLatestMessageTs) bubble.classList.add("message-enter");
+        }
         bubble.append(element("small", "sender", event.getSender() || "Unknown"));
         const message = event.getContent();
         const pictureMarker = flag(message, "picture") as { kind?: string } | undefined;
@@ -2382,7 +2407,6 @@ function renderApp(): void {
         }
         const body = typeof message.body === "string" ? message.body : "Attachment";
         const media = message.file as EncryptedMedia | undefined;
-        const eventId = event.getId();
         const isMedia = message.msgtype === "m.image" || message.msgtype === "m.file" || message.msgtype === "m.audio";
         if (event.isDecryptionFailure()) {
           bubble.append(element("p", "", "Unable to decrypt on this device. Older messages may need key recovery."));
