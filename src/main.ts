@@ -69,6 +69,12 @@ let starredMessages: StarredMessage[] = [];
 let roomWallpapers: Record<string, RoomWallpaper> = {};
 let notificationsSeenAt = 0;
 let pushFeedbackText = "";
+let sdkRenderQueued = false;
+function renderFromSync(): void {
+  if (activeSection === "settings" || sdkRenderQueued) return;
+  sdkRenderQueued = true;
+  requestAnimationFrame(() => { sdkRenderQueued = false; if (activeSection !== "settings") renderApp(); });
+}
 let displayNameDraft: string | null = null;
 let ownDisplayName: string | null = null;
 let statusText = "";
@@ -790,12 +796,12 @@ async function connect(session: SavedSession): Promise<void> {
       new Notification(brandName, { body: "New message", tag: room.roomId });
     }
     if (room?.roomId === activeRoomId && !document.hidden && !toStartOfTimeline) markRoomRead(room.roomId);
-    renderApp();
+    renderFromSync();
   });
   next.on(MatrixEventEvent.Decrypted, (event) => {
     handleViewOnceReceipt(event);
     if (event.getSender() === session.userId && (flag(event.getContent(), "picture") as { kind?: string } | undefined)?.kind === "profile") void loadSavedProfilePicture(next);
-    sweepExpiredMessages(); renderApp();
+    sweepExpiredMessages(); renderFromSync();
   });
   next.on(ClientEvent.AccountData, (event) => {
     const name = localName(event.getType());
@@ -803,16 +809,16 @@ async function connect(session: SavedSession): Promise<void> {
     if (name === localName(profilePictureAccountData)) void loadSavedProfilePicture(next);
     else if ([pinnedRoomsAccountData, starredMessagesAccountData, roomWallpapersAccountData].some((type) => localName(type) === name)) applyPreference(event.getType(), event.getContent());
   });
-  next.on(RoomEvent.Receipt, () => renderApp());
-  next.on(RoomEvent.LocalEchoUpdated, () => renderApp());
-  next.on(RoomEvent.Name, () => renderApp());
-  next.on(RoomEvent.MyMembership, () => renderApp());
-  next.on(RoomEvent.Redaction, () => { clearMediaUrls(); renderApp(); });
+  next.on(RoomEvent.Receipt, renderFromSync);
+  next.on(RoomEvent.LocalEchoUpdated, renderFromSync);
+  next.on(RoomEvent.Name, renderFromSync);
+  next.on(RoomEvent.MyMembership, renderFromSync);
+  next.on(RoomEvent.Redaction, () => { clearMediaUrls(); renderFromSync(); });
   next.on(UserEvent.Presence, (_event, user) => {
     presenceCache.set(user.userId, { presence: user.presence, lastSeen: user.currentlyActive ? Date.now() : user.getLastActiveTs() || undefined });
-    renderApp();
+    renderFromSync();
   });
-  next.on(ClientEvent.DeleteRoom, () => renderApp());
+  next.on(ClientEvent.DeleteRoom, renderFromSync);
   next.on(CryptoEvent.VerificationRequestReceived, (request) => {
     if (client !== next || !request.pending) return;
     verificationDialog(request, "Device verification requested");
@@ -1050,7 +1056,7 @@ async function refreshRoomTrust(roomId: string): Promise<void> {
   const ownId = currentSession?.userId;
   if (!target || !crypto || !room || !ownId || !room.hasEncryptionStateEvent()) return;
   try {
-    const devices = await crypto.getUserDeviceInfo(room.getJoinedMembers().map((member) => member.userId));
+    const devices = await crypto.getUserDeviceInfo(room.getJoinedMembers().map((member) => member.userId), true);
     const unverified: string[] = [];
     for (const [userId, userDevices] of devices) {
       for (const deviceId of userDevices.keys()) {
@@ -1121,7 +1127,6 @@ function verificationDialog(request: VerificationRequest, title: string): void {
       codes.replaceChildren();
       actions.replaceChildren(close);
       if (activeRoomId) void refreshRoomTrust(activeRoomId);
-      renderApp();
     }).catch((error: unknown) => {
       feedback.textContent = `Verification failed: ${errorMessage(error)}`;
       codes.replaceChildren();
@@ -1132,7 +1137,7 @@ function verificationDialog(request: VerificationRequest, title: string): void {
   let starting = false;
   const onChange = (): void => {
     if (request.verifier) track(request.verifier);
-    else if (request.phase === VerificationPhase.Ready && !starting) {
+    else if (request.initiatedByMe && request.phase === VerificationPhase.Ready && !starting) {
       starting = true;
       void request.startVerification("m.sas.v1").then(track).catch((error: unknown) => {
         // The other side may have started first; its verifier then arrives by event.
@@ -1167,16 +1172,7 @@ async function startDeviceVerification(userId: string, deviceId: string): Promis
   const crypto = client?.getCrypto();
   if (!crypto) return;
   try {
-    verificationDialog(await crypto.requestDeviceVerification(userId, deviceId), "Verify your other device");
-  } catch (error) { setStatus(`Could not request verification: ${errorMessage(error)}`); }
-}
-
-async function startMemberVerification(roomId: string, userId: string): Promise<void> {
-  const crypto = client?.getCrypto();
-  if (!crypto) return;
-  try {
-    const existing = crypto.findVerificationRequestDMInProgress(roomId, userId);
-    verificationDialog(existing || await crypto.requestVerificationDM(userId, roomId), `Verify ${userId}`);
+    verificationDialog(await crypto.requestDeviceVerification(userId, deviceId), `Verify ${userId} · ${deviceId}`);
   } catch (error) { setStatus(`Could not request verification: ${errorMessage(error)}`); }
 }
 
@@ -1263,20 +1259,15 @@ function roomDetails(roomId: string): void {
   const self = room.getMember(session.userId);
   const canKick = self && room.currentState.hasSufficientPowerLevelFor("kick", self.powerLevel);
   const unverified = unverifiedMembers.get(roomId) || [];
+  const deviceLists = new Map<string, HTMLElement>();
   for (const member of room.getJoinedMembers()) {
-    const item = element("li", "member-row");
+    const item = element("li", "member-row room-member");
+    const heading = element("div", "room-member-heading");
     const memberLabel = element("span", "", member.userId);
     if (room.hasEncryptionStateEvent() && unverified.includes(member.userId)) {
       memberLabel.append(element("small", "trust-unverified", trustLabel(false, member.userId === session.userId)));
     }
-    item.append(memberLabel);
-    if (member.userId !== session.userId && unverified.includes(member.userId)) {
-      const verify = element("button", "text-button", "Verify");
-      verify.type = "button";
-      verify.ariaLabel = `Verify ${member.userId}`;
-      verify.addEventListener("click", () => { dialog.close(); void startMemberVerification(roomId, member.userId); });
-      item.append(verify);
-    }
+    heading.append(memberLabel);
     if (canKick && member.userId !== session.userId && self.powerLevel > member.powerLevel) {
       const remove = element("button", "text-button", "Remove");
       remove.type = "button";
@@ -1288,8 +1279,11 @@ function roomDetails(roomId: string): void {
           if (client === target) { item.remove(); setStatus(`${member.userId} removed from room`); }
         } catch (error) { feedback.textContent = `Could not remove member: ${errorMessage(error)}`; }
       });
-      item.append(remove);
+      heading.append(remove);
     }
+    const devices = element("div", "room-member-devices", "Loading devices…");
+    deviceLists.set(member.userId, devices);
+    item.append(heading, devices);
     list.append(item);
   }
   dialog.append(list, feedback);
@@ -1298,6 +1292,28 @@ function roomDetails(roomId: string): void {
   done.type = "button";
   done.addEventListener("click", () => dialog.close());
   dialog.append(done);
+  const crypto = target.getCrypto();
+  if (crypto) void crypto.getUserDeviceInfo([...deviceLists.keys()], true).then(async (allDevices) => {
+    for (const [userId, devices] of deviceLists) {
+      if (!dialog.open || client !== target) return;
+      const rows: HTMLElement[] = [];
+      for (const [deviceId, device] of allDevices.get(userId) || []) {
+        if (userId === session.userId && deviceId === session.deviceId) continue;
+        const verified = (await crypto.getDeviceVerificationStatus(userId, deviceId))?.isVerified() || false;
+        const row = element("div", "room-device-row");
+        row.append(element("small", verified ? "trust-verified" : "trust-unverified", `${device.displayName || deviceId} · ${verified ? "Verified" : "Unverified"}`));
+        if (!verified) {
+          const verify = element("button", "text-button", "Verify device");
+          verify.type = "button";
+          verify.ariaLabel = `Verify ${userId} device ${deviceId}`;
+          verify.addEventListener("click", () => { dialog.close(); void startDeviceVerification(userId, deviceId); });
+          row.append(verify);
+        }
+        rows.push(row);
+      }
+      devices.replaceChildren(...(rows.length ? rows : [element("small", "trust-verified", "No other devices to verify")]));
+    }
+  }).catch(() => { for (const devices of deviceLists.values()) devices.textContent = "Device list unavailable. Try again after reconnecting."; });
 }
 
 function showRoomWallpaper(roomId: string): void {
@@ -1944,13 +1960,13 @@ function renderApp(): void {
   const pushEnabled = nativePushAvailable() ? nativePushEnabled(currentSession.userId) : webPushEnabled(currentSession.userId);
   const backgroundPush = element("button", "recovery-button", pushEnabled ? "Disable background push" : "Enable background push");
   backgroundPush.type = "button";
-  backgroundPush.disabled = !pushAvailable;
   backgroundPush.addEventListener("click", async () => {
     const target = client;
     const owner = currentSession?.userId;
     if (!target || !owner) return;
     backgroundPush.disabled = true;
     try {
+      if (!pushAvailable) throw new Error("Alerts are unavailable in this app session. Open the installed Android app or an HTTPS browser that supports push.");
       if (nativePushAvailable()) {
         if (nativePushEnabled(owner)) { await disableNativePush(target, owner); pushFeedbackText = "Background push disabled on this device."; }
         else { await enableNativePush(target, owner, brandName); pushFeedbackText = "Background push enabled. Send a test alert to check your phone."; }
